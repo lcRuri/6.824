@@ -98,7 +98,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		TaskChannel:   make(chan string, len(files)),
 		TaskList:      make(map[string]int, len(files)),
 		WorkerList:    map[string]int64{},
-		Intermediate:  make([][]string, nReduce),
+		Intermediate:  make([][]string, len(files)),
 		Stage:         Map,
 		nReduce:       nReduce,
 		ReduceChannel: make(chan int, nReduce),
@@ -111,6 +111,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	for i, filename := range files {
 		c.TaskChannel <- filename
 		c.TaskList[filename] = i
+
 	}
 
 	for i := 0; i < nReduce; i++ {
@@ -133,6 +134,7 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 			//	reply.Stage = Wait
 			//}
 			reply.Stage = Wait
+
 			mu.Unlock()
 			//c.WaitChannel[args.WorkID]=1
 
@@ -145,6 +147,7 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 			reply.NReduce = c.nReduce
 			reply.Stage = Map
 			reply.MapTaskID = c.TaskList[tmp]
+			//fmt.Printf("reply.MapTaskID:%d\n", reply.MapTaskID)
 			//delete(c.WaitChannel,args.WorkID)
 			//record wordId with content
 			c.WorkerList[tmp] = args.WorkID
@@ -177,7 +180,13 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 			mu.Lock()
 			reply.Stage = Reduce
 			reduceID := <-c.ReduceChannel
-			reply.Intermediate = c.Intermediate[reduceID]
+			//fmt.Println(c.Intermediate)
+			tmp := []string{}
+			for i := 0; i < len(c.Intermediate); i++ {
+				f1 := c.Intermediate[i][reduceID]
+				tmp = append(tmp, f1)
+			}
+			reply.Intermediate = tmp
 			reply.ReduceTaskID = reduceID
 			//delete(c.WaitChannel,args.WorkID)
 			c.WorkerList[string(reduceID)] = args.WorkID
@@ -204,7 +213,8 @@ func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 		delete(c.TaskList, args.Filename)
 		delete(c.WorkerList, args.Filename)
 		reply.Stage = c.Stage
-		c.Intermediate = append(c.Intermediate, args.Intermediate)
+		//fmt.Printf("TaskDone:reply.MapTaskID:%d\n", args.MapTaskID)
+		c.Intermediate[args.MapTaskID] = args.Intermediate
 		//fmt.Printf("TaskDone.Map:task:%v is finish\n", args.Filename)
 		mu.Unlock()
 	} else if c.Stage == Reduce {
@@ -230,13 +240,24 @@ func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 			mu.Unlock()
 			return nil
 		} else {
-			mu.Lock()
+			//mu.Lock()
 			//fmt.Printf("c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
 			//fmt.Println("Goto reducing")
-			c.Stage = Reduce
-			reply.Stage = Reduce
-			mu.Unlock()
-			return nil
+			//c.Stage = Reduce
+			//reply.Stage = Reduce
+			//mu.Unlock()
+			//return nil
+			//mu.Lock()
+			go func() {
+
+				if len(c.WorkerList) == 0 {
+					//fmt.Printf("c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
+					fmt.Println("Goto reducing", len(c.Intermediate[0]))
+					c.Stage = Reduce
+				}
+
+			}()
+			//mu.Unlock()
 		}
 
 	}
@@ -252,9 +273,13 @@ func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 		mu.Unlock()
 		//fmt.Printf("TaskDone.Done:c.WorkerList:%d,c.ReduceChannel:%d,c.Stage:%d\n", len(c.WorkerList), len(c.ReduceChannel), c.Stage)
 		go func() {
+			mu.Lock()
 			if len(c.ReduceChannel) == 0 && len(c.WorkerList) == 0 {
+
 				c.Stage = Done
+				//fmt.Println("go change c stage to done")
 			}
+			mu.Unlock()
 		}()
 	}
 	return nil

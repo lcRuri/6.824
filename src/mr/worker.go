@@ -71,10 +71,11 @@ func Worker(mapf func(string, string) []KeyValue,
 			reply.Intermediate = tmpFileName
 		case Reduce:
 			//fmt.Printf("Reduce Work ID:%d\n", reply.ReduceTaskID)
+			//fmt.Printf("reply intermediate:%v\n", reply)
 			ReduceWorker(reply, reducef)
 		case Wait:
 			//fmt.Println("Waiting")
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Second)
 		case Done:
 			//fmt.Printf("Worker Job is Done\n")
 			time.Sleep(2 * time.Second)
@@ -144,6 +145,7 @@ func ReduceWorker(reply Reply, reducef func(string, []string) string) {
 
 func readFromLocal(reply Reply) (kva []KeyValue) {
 	for _, filename := range reply.Intermediate {
+		//fmt.Println(filename)
 		file, err := os.Open(filename)
 		if err != nil {
 			fmt.Printf("readFromLocal os.Open(filename) err:%v\n", err)
