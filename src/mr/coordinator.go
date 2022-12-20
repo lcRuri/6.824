@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 )
 import "net"
 import "os"
@@ -128,52 +127,53 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 		//avoid parallel race
 		if len(c.TaskChannel) == 0 {
 			mu.Lock()
-			if len(c.WorkerList) == 0 {
-				reply.Stage = Reduce
-			} else {
-				reply.Stage = Wait
-			}
+			//if len(c.WorkerList) == 0 {
+			//	reply.Stage = Reduce
+			//} else {
+			//	reply.Stage = Wait
+			//}
+			reply.Stage = Wait
 			mu.Unlock()
 			//c.WaitChannel[args.WorkID]=1
-			return nil
+
+		} else {
+			mu.Lock()
+			//assign task
+			//取不出来会阻塞
+			tmp := <-c.TaskChannel
+			reply.Filename = tmp
+			reply.NReduce = c.nReduce
+			reply.Stage = Map
+			reply.MapTaskID = c.TaskList[tmp]
+			//delete(c.WaitChannel,args.WorkID)
+			//record wordId with content
+			c.WorkerList[tmp] = args.WorkID
+			mu.Unlock()
+			//fmt.Printf("AssignTask.Map:worker ID:%v,stage:%d,reply.nReduce:%d,c.nReduce:%d\n", args.WorkID, c.Stage, reply.NReduce, c.nReduce)
+			//fmt.Printf("AssignTask.Map:c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
 		}
-		mu.Lock()
-		//assign task
-		//取不出来会阻塞
-		tmp := <-c.TaskChannel
-		reply.Filename = tmp
-		reply.NReduce = c.nReduce
-		reply.Stage = Map
-		reply.MapTaskID = c.TaskList[tmp]
-		//delete(c.WaitChannel,args.WorkID)
-		//record wordId with content
-		c.WorkerList[tmp] = args.WorkID
-		mu.Unlock()
-		//fmt.Printf("AssignTask.Map:worker ID:%v,stage:%d,reply.nReduce:%d,c.nReduce:%d\n", args.WorkID, c.Stage, reply.NReduce, c.nReduce)
-		//fmt.Printf("AssignTask.Map:c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
 
 	} else if c.Stage == Reduce {
-		if len(c.ReduceChannel) == 0 && len(c.WorkerList) == 0 {
+		if len(c.ReduceChannel) == 0 /**&& len(c.WorkerList) == 0**/ {
 			mu.Lock()
 			//fmt.Println("go to check all task is finish")
-			for len(c.WorkerList) != 0 || len(c.TaskList) != 0 {
-				time.Sleep(time.Second)
-			}
-
-			c.Stage = Done
+			//for len(c.WorkerList) != 0 || len(c.TaskList) != 0 {
+			//	time.Sleep(time.Second)
+			//}
+			//c.Stage = Done
 			reply.Stage = Done
 			//reply.ReduceTaskID=-1
 			mu.Unlock()
-			time.Sleep(time.Second)
+			//time.Sleep(time.Second)
 			//fmt.Printf("The Task is Done\n")
 			return nil
 		} else {
 			//取不出来会阻塞
-			if len(c.ReduceChannel) == 0 {
-				reply.Stage = Wait
-				//c.WaitChannel[args.WorkID]=1
-				return nil
-			}
+			//if len(c.ReduceChannel) == 0 {
+			//	reply.Stage = Wait
+			//	//c.WaitChannel[args.WorkID]=1
+			//	return nil
+			//}
 			mu.Lock()
 			reply.Stage = Reduce
 			reduceID := <-c.ReduceChannel
@@ -185,12 +185,13 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 			mu.Unlock()
 			//fmt.Println(reduceID)
 			//fmt.Printf("AssignTask.Reduce:c.WorkerList:%d,c.ReduceChannel:%d,reduceID:%d\n", len(c.WorkerList), len(c.ReduceChannel), reduceID)
-
 		}
 
 	} else if c.Stage == Done {
 		//fmt.Printf("The Task is Done\n")
+		mu.Lock()
 		reply.Stage = Done
+		mu.Unlock()
 	}
 
 	return nil
@@ -198,7 +199,7 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 
 func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 
-	if args.Stage == Map {
+	if c.Stage == Map {
 		mu.Lock()
 		delete(c.TaskList, args.Filename)
 		delete(c.WorkerList, args.Filename)
@@ -206,28 +207,21 @@ func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 		c.Intermediate = append(c.Intermediate, args.Intermediate)
 		//fmt.Printf("TaskDone.Map:task:%v is finish\n", args.Filename)
 		mu.Unlock()
-	} else if args.Stage == Reduce {
+	} else if c.Stage == Reduce {
 		mu.Lock()
 		delete(c.TaskList, string(args.ReduceTaskID))
 		delete(c.WorkerList, string(args.ReduceTaskID))
 		reply.Stage = c.Stage
 		//fmt.Printf("TaskDone.Reduce:task:%v is finish\n", args.ReduceTaskID)
 		mu.Unlock()
-		if len(c.WorkerList) == 0 && len(c.TaskChannel) == 0 && len(c.ReduceChannel) == 0 {
-			//fmt.Printf("TaskDone.Done:c.WorkerList:%d,c.ReduceChannel:%d,c.Stage:%d\n", len(c.WorkerList), len(c.ReduceChannel), c.Stage)
-			//fmt.Println("Job is Done")
-			reply.Stage = Done
-			mu.Lock()
-			c.Stage = Done
-			mu.Unlock()
-			//fmt.Printf("TaskDone.Done:c.WorkerList:%d,c.ReduceChannel:%d,c.Stage:%d\n", len(c.WorkerList), len(c.ReduceChannel), c.Stage)
 
-		}
-
-	} else if args.Stage == Done {
+	} else if c.Stage == Done {
+		mu.Lock()
 		reply.Stage = Done
+		mu.Unlock()
 		return nil
 	}
+	//等待所以map结束进入reduce阶段
 	if len(c.TaskChannel) == 0 && len(c.ReduceChannel) >= c.nReduce {
 
 		if len(c.WorkerList) != 0 {
@@ -235,15 +229,33 @@ func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 			reply.Stage = Wait
 			mu.Unlock()
 			return nil
+		} else {
+			mu.Lock()
+			//fmt.Printf("c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
+			//fmt.Println("Goto reducing")
+			c.Stage = Reduce
+			reply.Stage = Reduce
+			mu.Unlock()
+			return nil
 		}
-		mu.Lock()
-		//fmt.Printf("c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
-		//fmt.Println("Goto reducing")
-		c.Stage = Reduce
-		reply.Stage = Reduce
-		mu.Unlock()
-		return nil
+
 	}
 	//fmt.Printf("Intermediate:", c.Intermediate[0:1])
+
+	//如果reduce channel为空,让worker进程结束
+	if /**len(c.WorkerList) == 0 &&**/ len(c.ReduceChannel) == 0 {
+		//fmt.Printf("TaskDone.Done:c.WorkerList:%d,c.ReduceChannel:%d,c.Stage:%d\n", len(c.WorkerList), len(c.ReduceChannel), c.Stage)
+		//fmt.Println("Job is Done")
+		mu.Lock()
+		reply.Stage = Done
+		//c.Stage = Done
+		mu.Unlock()
+		//fmt.Printf("TaskDone.Done:c.WorkerList:%d,c.ReduceChannel:%d,c.Stage:%d\n", len(c.WorkerList), len(c.ReduceChannel), c.Stage)
+		go func() {
+			if len(c.ReduceChannel) == 0 && len(c.WorkerList) == 0 {
+				c.Stage = Done
+			}
+		}()
+	}
 	return nil
 }
