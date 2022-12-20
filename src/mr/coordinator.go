@@ -14,7 +14,8 @@ import "net/http"
 const (
 	Map    = 1
 	Reduce = 2
-	Done   = 3
+	Wait   = 3
+	Done   = 4
 )
 
 type Coordinator struct {
@@ -124,8 +125,13 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 	//fmt.Println(len(c.TaskChannel))
 	if c.Stage == Map {
 		//avoid parallel race
+		if len(c.TaskChannel) == 0 {
+			reply.Stage = Wait
+			return nil
+		}
 		mu.Lock()
 		//assign task
+		//取不出来会阻塞
 		tmp := <-c.TaskChannel
 		reply.Filename = tmp
 		reply.NReduce = c.nReduce
@@ -134,40 +140,44 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 		//record wordId with content
 		c.WorkerList[tmp] = args.WorkID
 		mu.Unlock()
-		fmt.Printf("worker ID:%v,stage:%d,reply.nReduce:%d,c.nReduce:%d\n", args.WorkID, c.Stage, reply.NReduce, c.nReduce)
-		fmt.Printf("c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
+		fmt.Printf("AssignTask.Map:worker ID:%v,stage:%d,reply.nReduce:%d,c.nReduce:%d\n", args.WorkID, c.Stage, reply.NReduce, c.nReduce)
+		fmt.Printf("AssignTask.Map:c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
 
 	} else if c.Stage == Reduce {
-		if len(c.WorkerList) == 0 && len(c.ReduceChannel) == 0 {
+		if len(c.ReduceChannel) == 0 && len(c.WorkerList) == 0 {
 			mu.Lock()
-			//fmt.Println("go to check all task is finish")
-			for len(c.WorkerList) != 0 {
+			fmt.Println("go to check all task is finish")
+			for len(c.WorkerList) != 0 || len(c.TaskList) != 0 {
 				time.Sleep(time.Second)
 			}
 			c.Stage = Done
 			reply.Stage = Done
+			//reply.ReduceTaskID=-1
 			mu.Unlock()
-			time.Sleep(2 * time.Second)
+			time.Sleep(time.Second)
 			fmt.Printf("The Task is Done\n")
 			return nil
-		}
-
-		if len(c.ReduceChannel) == 0 {
-			mu.Lock()
-			reply.Stage = Done
-			reply.ReduceTaskID = -1
-			mu.Unlock()
 		} else {
 			mu.Lock()
 			reply.Stage = Reduce
 			reduceID := <-c.ReduceChannel
-			fmt.Println(reduceID)
 			reply.Intermediate = c.Intermediate[reduceID]
 			reply.ReduceTaskID = reduceID
 			c.WorkerList[string(reduceID)] = args.WorkID
-			fmt.Printf("c.WorkerList:%d,c.ReduceChannel:%d\n", len(c.WorkerList), len(c.ReduceChannel))
+			c.TaskList[string(reduceID)] = int(args.WorkID)
 			mu.Unlock()
+			//fmt.Println(reduceID)
+			fmt.Printf("AssignTask.Reduce:c.WorkerList:%d,c.ReduceChannel:%d,reduceID:%d\n", len(c.WorkerList), len(c.ReduceChannel), reduceID)
+
 		}
+
+		//if len(c.ReduceChannel) == 0 {
+		//	mu.Lock()
+		//	reply.Stage = Done
+		//	reply.ReduceTaskID = -1
+		//	mu.Unlock()
+		//	return nil
+		//}
 
 	}
 
@@ -175,24 +185,35 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 }
 
 func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
+
 	if args.Stage == Map {
 		mu.Lock()
 		delete(c.TaskList, args.Filename)
 		delete(c.WorkerList, args.Filename)
 		c.Intermediate = append(c.Intermediate, args.Intermediate)
+		fmt.Printf("TaskDone.Map:task:%v is finish\n", args.Filename)
 		mu.Unlock()
 	} else if args.Stage == Reduce {
 		mu.Lock()
+		delete(c.TaskList, string(args.ReduceTaskID))
 		delete(c.WorkerList, string(args.ReduceTaskID))
+		fmt.Printf("TaskDone.Reduce:task:%v is finish\n", args.ReduceTaskID)
 		mu.Unlock()
-	}
+		if len(c.WorkerList) == 0 && len(c.TaskChannel) == 0 && len(c.ReduceChannel) == 0 {
+			fmt.Printf("c.WorkerList:%d,c.ReduceChannel:%d\n", len(c.WorkerList), len(c.ReduceChannel))
+			fmt.Println("Job is Done")
+			reply.Stage = Done
+			return nil
+		}
 
+	}
 	if len(c.WorkerList) == 0 && len(c.TaskChannel) == 0 && len(c.ReduceChannel) >= c.nReduce {
 		mu.Lock()
 		fmt.Printf("c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
 		fmt.Println("Goto reducing")
 		c.Stage = Reduce
 		mu.Unlock()
+		return nil
 	}
 	//fmt.Printf("Intermediate:", c.Intermediate[0:1])
 	return nil

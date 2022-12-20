@@ -73,6 +73,9 @@ func Worker(mapf func(string, string) []KeyValue,
 		case Reduce:
 			fmt.Printf("Reduce Work ID:%d\n", reply.ReduceTaskID)
 			ReduceWorker(reply, reducef)
+		case Wait:
+			fmt.Println("Waiting")
+			time.Sleep(time.Millisecond)
 		case Done:
 			fmt.Printf("Worker Job is Done\n")
 			time.Sleep(2 * time.Second)
@@ -81,7 +84,11 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 
 		JobDone(reply)
-		time.Sleep(time.Second)
+		if reply.Stage == Done {
+			fmt.Printf("Worker Job is Done\n")
+			os.Exit(200)
+		}
+
 	}
 
 	//fmt.Println(intermediate[:10])
