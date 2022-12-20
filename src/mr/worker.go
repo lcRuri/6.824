@@ -58,10 +58,9 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	// Your worker implementation here.
-
+	workID := time.Now().Unix()
 	for {
 		intermediate := []KeyValue{}
-		workID := time.Now().Unix()
 		reply := AskForTask(workID)
 
 		switch reply.Stage {
@@ -71,23 +70,21 @@ func Worker(mapf func(string, string) []KeyValue,
 			tmpFileName := StoreIntermediate(reply, intermediate)
 			reply.Intermediate = tmpFileName
 		case Reduce:
-			fmt.Printf("Reduce Work ID:%d\n", reply.ReduceTaskID)
+			//fmt.Printf("Reduce Work ID:%d\n", reply.ReduceTaskID)
 			ReduceWorker(reply, reducef)
 		case Wait:
-			fmt.Println("Waiting")
+			//fmt.Println("Waiting")
 			time.Sleep(time.Millisecond)
 		case Done:
-			fmt.Printf("Worker Job is Done\n")
+			//fmt.Printf("Worker Job is Done\n")
 			time.Sleep(2 * time.Second)
-			os.Exit(200)
 			break
 		}
-
-		JobDone(reply)
 		if reply.Stage == Done {
-			fmt.Printf("Worker Job is Done\n")
-			os.Exit(200)
+			//fmt.Printf("Worker Job is Done\n")
+			break
 		}
+		JobDone(reply)
 
 	}
 
@@ -175,7 +172,7 @@ func AskForTask(WorkerId int64) (reply Reply) {
 	ok := call("Coordinator.AssignTask", &args, &reply)
 	if ok {
 		// reply.Y should be 100.
-		fmt.Printf("reply.Filename:%v,reply.nReduce:%d,reply.ReduceTaskID:%d,reply.Stage:%d\n", reply.Filename, reply.NReduce, reply.ReduceTaskID, reply.Stage)
+		//fmt.Printf("reply.Filename:%v,reply.nReduce:%d,reply.ReduceTaskID:%d,reply.Stage:%d\n", reply.Filename, reply.NReduce, reply.ReduceTaskID, reply.Stage)
 		//fmt.Printf("reply:%v\n", reply)
 	} else {
 		fmt.Printf("call failed!\n")
@@ -184,15 +181,17 @@ func AskForTask(WorkerId int64) (reply Reply) {
 	return reply
 }
 
-func JobDone(msg Reply) {
-	reply := struct{}{}
+func JobDone(msg Reply) (reply Reply) {
+	reply = Reply{}
 	ok := call("Coordinator.TaskDone", &msg, &reply)
 	if ok {
 		// reply.Y should be 100.
-		//fmt.Printf("reply %v\n", reply)
+		//fmt.Printf("reply.Filename:%v,reply.nReduce:%d,reply.ReduceTaskID:%d,reply.Stage:%d\n", reply.Filename, reply.NReduce, reply.ReduceTaskID, reply.Stage)
 	} else {
 		fmt.Printf("call failed!\n")
 	}
+
+	return
 }
 
 func StoreIntermediate(reply Reply, intermediates []KeyValue) []string {
