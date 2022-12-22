@@ -86,7 +86,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			break
 		}
 		JobDone(reply)
-
+		time.Sleep(time.Second)
 	}
 
 	//fmt.Println(intermediate[:10])

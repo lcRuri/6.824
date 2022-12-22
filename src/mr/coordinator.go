@@ -72,7 +72,8 @@ func (c *Coordinator) server() {
 //
 func (c *Coordinator) Done() bool {
 	ret := false
-
+	mu.Lock()
+	defer mu.Unlock()
 	// Your code here.
 
 	if c.Stage == Done {
@@ -84,6 +85,7 @@ func (c *Coordinator) Done() bool {
 
 		//fmt.Printf("The Task is Done\n")
 	}
+
 	return ret
 }
 
@@ -248,15 +250,15 @@ func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 			//mu.Unlock()
 			//return nil
 			//mu.Lock()
-			go func() {
 
-				if len(c.WorkerList) == 0 {
-					//fmt.Printf("c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
-					fmt.Println("Goto reducing", len(c.Intermediate[0]))
-					c.Stage = Reduce
-				}
+			if len(c.WorkerList) == 0 && c.Stage == Map {
+				//fmt.Printf("c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
+				//fmt.Println("Goto reducing", len(c.Intermediate[0]))
+				mu.Lock()
+				c.Stage = Reduce
+				mu.Unlock()
+			}
 
-			}()
 			//mu.Unlock()
 		}
 
@@ -272,15 +274,14 @@ func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 		//c.Stage = Done
 		mu.Unlock()
 		//fmt.Printf("TaskDone.Done:c.WorkerList:%d,c.ReduceChannel:%d,c.Stage:%d\n", len(c.WorkerList), len(c.ReduceChannel), c.Stage)
-		go func() {
-			mu.Lock()
-			if len(c.ReduceChannel) == 0 && len(c.WorkerList) == 0 {
 
-				c.Stage = Done
-				//fmt.Println("go change c stage to done")
-			}
+		if len(c.ReduceChannel) == 0 && len(c.WorkerList) == 0 {
+			mu.Lock()
+			c.Stage = Done
+			//fmt.Println("go change c stage to done")
 			mu.Unlock()
-		}()
+		}
+
 	}
 	return nil
 }
