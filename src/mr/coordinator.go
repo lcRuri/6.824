@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 import "net"
 import "os"
@@ -153,6 +154,7 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 			//delete(c.WaitChannel,args.WorkID)
 			//record wordId with content
 			c.WorkerList[tmp] = args.WorkID
+			//go c.CheckTimeOut(c.Stage, tmp)
 			mu.Unlock()
 			//fmt.Printf("AssignTask.Map:worker ID:%v,stage:%d,reply.nReduce:%d,c.nReduce:%d\n", args.WorkID, c.Stage, reply.NReduce, c.nReduce)
 			//fmt.Printf("AssignTask.Map:c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
@@ -193,6 +195,7 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 			//delete(c.WaitChannel,args.WorkID)
 			c.WorkerList[string(reduceID)] = args.WorkID
 			c.TaskList[string(reduceID)] = int(args.WorkID)
+			//go c.CheckTimeOut(c.Stage, reduceID)
 			mu.Unlock()
 			//fmt.Println(reduceID)
 			//fmt.Printf("AssignTask.Reduce:c.WorkerList:%d,c.ReduceChannel:%d,reduceID:%d\n", len(c.WorkerList), len(c.ReduceChannel), reduceID)
@@ -250,15 +253,13 @@ func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 			//mu.Unlock()
 			//return nil
 			//mu.Lock()
-
+			mu.Lock()
 			if len(c.WorkerList) == 0 && c.Stage == Map {
 				//fmt.Printf("c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
 				//fmt.Println("Goto reducing", len(c.Intermediate[0]))
-				mu.Lock()
 				c.Stage = Reduce
-				mu.Unlock()
 			}
-
+			mu.Unlock()
 			//mu.Unlock()
 		}
 
@@ -274,14 +275,36 @@ func (c *Coordinator) TaskDone(args *Reply, reply *Reply) error {
 		//c.Stage = Done
 		mu.Unlock()
 		//fmt.Printf("TaskDone.Done:c.WorkerList:%d,c.ReduceChannel:%d,c.Stage:%d\n", len(c.WorkerList), len(c.ReduceChannel), c.Stage)
-
+		mu.Lock()
 		if len(c.ReduceChannel) == 0 && len(c.WorkerList) == 0 {
-			mu.Lock()
 			c.Stage = Done
 			//fmt.Println("go change c stage to done")
-			mu.Unlock()
 		}
+		mu.Unlock()
 
 	}
 	return nil
+}
+
+func (c *Coordinator) CheckTimeOut(stage int, msg interface{}) {
+	time.Sleep(10 * time.Second)
+	if stage == Map {
+		filename := msg.(string)
+		mu.Lock()
+		startTime := c.WorkerList[filename]
+		if time.Now().Unix()-startTime > 10 {
+			c.TaskChannel <- filename
+		}
+		mu.Unlock()
+	} else if stage == Reduce {
+		reduceID := msg.(int)
+		mu.Lock()
+		startTime := c.WorkerList[string(reduceID)]
+		if time.Now().Unix()-startTime > 10 {
+			c.ReduceChannel <- reduceID
+		}
+		mu.Unlock()
+	} else if c.Stage == Done {
+		return
+	}
 }
