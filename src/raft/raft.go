@@ -33,7 +33,8 @@ import (
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
 // committed log entry.
-//
+//当每个Raft对等体意识到连续的日志条目被提交时，对等体应该通过传递给Make()的applyCh向同一服务器上的服务(或测试器)发送一个ApplyMsg。
+//setCommandValid为true，表示ApplyMsg包含一个新提交的日志条目。
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
@@ -57,14 +58,20 @@ type ApplyMsg struct {
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state 锁
 	peers     []*labrpc.ClientEnd // RPC end points of all peers 所有 Raft peers（包括这一个）的网络标识符数组
-	persister *Persister          // Object to hold this peer's persisted state
+	persister *Persister          // Object to hold this peer's persisted state 对象来保存此对等体的持久状态
 	me        int                 // this peer's index into peers[] 属于这个peer的网络标识符的的下标
 	dead      int32               // set by Kill() 设置原来kill raft实例
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	LeaderState *LeadersState //Leader的状态
+	//图2描述了Raft服务器必须维护的状态。
+	raftState *RaftState
+}
+
+type RaftState struct {
+	LeadersState *LeadersState
+	ServerState  *ServerState
 }
 
 //LeadersState 选举后要重新初始化
@@ -192,12 +199,27 @@ type ReceiveEntriesRPC struct {
 //
 // example RequestVote RPC handler.
 //
-//请求投票 即发起投票请求
+//RequestVote 请求投票 即发起投票请求
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	//某个节点请求投票，需要分发到这个网络里面的所有节点
 }
 
+//发送RequestVote RPC到服务器的示例代码。
+//Server是rf.peers[]中目标服务器的索引。
+//在args中期望RPC参数。
+//*reply用RPC reply填充，所以调用者应该传递&reply。
+//传递给Call()的args和reply的类型必须与handler函数中声明的参数的类型相同(包括它们是否是指针)。
 //
+//labrpc包模拟了一个有损耗的网络，其中服务器可能不可达，请求和应答可能丢失。
+//Call()发送请求并等待应答。如果应答在超时时间内到达，Call()返回true;否则，ecall()返回false。因此，Call()可能暂时不会返回。
+//错误的返回可能是由一个死服务器、一个无法到达的活动服务器、一个丢失的请求或一个丢失的回复引起的。
+//
+//Call()保证返回(可能在延迟之后)*，除非服务器端的处理函数没有返回。因此，没有必要围绕Call()实现自己的超时。
+//
+//查看../labrpc/labrpc中的注释。了解更多细节。
+//
+//如果你在让RPC工作时遇到了麻烦，检查你是否在传递给RPC的结构中对所有字段名进行了大写，并且调用者使用&来传递应答结构的地址，而不是结构本身。
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -231,7 +253,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+//使用Raft的服务(例如k/v服务器)希望启动下一个命令的协议，以追加到Raft的日志中。
+//如果这个服务器不是leader，返回false。否则启动协议并立即返回。
+//因为领导人可能会失败或输掉选举，所以不能保证这个命令会被提交到Raft日志中。
+//即使Raft实例已经被杀死，这个函数也应该优雅地返回。
 //
+//第一个返回值是命令提交后将出现的索引。第二个返回值是currentterm。如果该服务器认为它是leader，则第三个返回值为true。
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -298,17 +325,19 @@ func (rf *Raft) ticker() {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-//
-func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+//服务或测试人员想要创建一个Raft服务器。所有Raft服务器(包括这个)的端口都在对等体[]中。
+//这个服务器的端口是peers[me]。所有服务器的对等体[]数组的顺序都是相同的。
+//Persister是服务器保存其持久状态的地方，如果有的话，它最初还保存最近保存的状态。
+//applyCh是一个通道，测试人员或服务期望Raft在该通道上发送ApplyMsg消息。
+//make()必须快速返回，因此它应该启动goroutinesor任何长时间运行的工作。
+func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	//raft实例初始化
 	rf := &Raft{
-		mu:          sync.Mutex{},
-		peers:       peers,
-		persister:   persister,
-		me:          me,
-		dead:        0,
-		LeaderState: &LeadersState{},
+		mu:        sync.Mutex{},
+		peers:     peers,
+		persister: persister,
+		me:        me,
+		dead:      0,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).

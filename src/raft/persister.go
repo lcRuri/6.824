@@ -7,7 +7,12 @@ package raft
 // we will use the original persister.go to test your code for grading.
 // so, while you can modify this code to help you debug, please
 // test with the original before submitting.
+//支持Raft和kraft保存持久
+//Raft状态(log &c)和k/v服务器快照。
 //
+//我们将使用原始的持久性。去测试你的代码以进行评分。
+//因此，虽然您可以修改此代码以帮助您进行调试，但请
+//在提交之前先测试原文。
 
 import "sync"
 

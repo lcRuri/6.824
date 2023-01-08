@@ -47,7 +47,52 @@ package labrpc
 // svc := MakeService(receiverObject) -- obj's methods will handle RPCs
 //   much like Go's rpcs.Register()
 //   pass svc to srv.AddService()
+//基于通道的RPC，用于824个实验室。
 //
+//模拟一个可能丢失请求和回复的网络，
+//延迟消息，并完全断开特定主机的连接。
+//
+//我们将使用原来的labrpc。去测试你的代码以进行评分。
+//因此，虽然您可以修改此代码以帮助您进行调试，但请
+//在提交前对照原文进行测试。
+//
+//改编自Go net/rpc/server.go
+//
+//发送labgob编码的值，以确保rpc
+//不要包含对程序对象的引用。
+//
+//net:= MakeNetwork()——保存网络，客户端，服务器。
+//end:= net.MakeEnd(endname)——创建一个客户端端点，与一个服务器通信。
+//网AddServer(servername, server)——将一个命名服务器添加到网络。
+//net.DeleteServer(servername)——删除命名服务器。
+//网Connect(endname, servername)——将客户端连接到服务器。
+//网Enable(endname, enabled)——启用/禁用客户端。
+//net.Reliable(bool)——false表示丢弃/延迟消息
+//
+//end.Call(“筏。AppendEntries"， &args， &reply)——发送一个RPC，等待回复。
+//“Raft”是要调用的服务器结构的名称。
+//AppendEntries是要调用的方法的名称。
+//Call()返回true，表示服务器执行了请求
+//回答是有效的。
+//如果网络丢失请求或应答，则Call()返回false
+//或者服务器宕机。
+//对象上同时有多个正在进行的Call()是可以的
+//ClientEnd相同。
+//对Call()的并发调用可能会被无序地传递给服务器，
+//因为网络可能会重新排序消息。
+//Call()保证返回(可能在延迟之后)*除非*如果
+//处理程序函数在服务器端不返回。
+//服务器RPC处理函数必须声明它的参数和回复参数
+//作为指针，使它们的类型与实参的类型完全匹配
+//叫()。
+//
+//srv:= MakeServer()
+//srv.AddService(svc)——一个服务器可以有多个服务，例如Raft和k/v
+//将srv传递给net.AddServer()
+//
+//svc:= MakeService(receiverObject)——obj的方法将处理rpc
+//很像Go的rpc . register ()
+//将svc传递给srv.AddService()
 
 import "6.824/labgob"
 import "bytes"
@@ -60,7 +105,7 @@ import "time"
 import "sync/atomic"
 
 type reqMsg struct {
-	endname  interface{} // name of sending ClientEnd
+	endname  interface{} // name of sending ClientEnd 发送ClientEnd的名称
 	svcMeth  string      // e.g. "Raft.AppendEntries"
 	argsType reflect.Type
 	args     []byte
@@ -73,14 +118,17 @@ type replyMsg struct {
 }
 
 type ClientEnd struct {
-	endname interface{}   // this end-point's name
-	ch      chan reqMsg   // copy of Network.endCh
-	done    chan struct{} // closed when Network is cleaned up
+	endname interface{}   // this end-point's name 这个端点的名字
+	ch      chan reqMsg   // copy of Network.endCh Network.endCh的副本
+	done    chan struct{} // closed when Network is cleaned up 当网络被清理时关闭
 }
 
-// send an RPC, wait for the reply.
-// the return value indicates success; false means that
-// no reply was received from the server.
+//send an RPC, wait for the reply.
+//the return value indicates success; false means that
+//no reply was received from the server.
+//发送一个RPC，等待回复。
+//返回值表示成功;False表示
+//服务器没有回复。
 func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bool {
 	req := reqMsg{}
 	req.endname = e.endname
