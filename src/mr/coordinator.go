@@ -154,8 +154,8 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 			//delete(c.WaitChannel,args.WorkID)
 			//record wordId with content
 			c.WorkerList[tmp] = args.WorkID
-			//go c.CheckTimeOut(c.Stage, tmp)
 			mu.Unlock()
+			//go c.CheckTimeOut(c.Stage, tmp)
 			//fmt.Printf("AssignTask.Map:worker ID:%v,stage:%d,reply.nReduce:%d,c.nReduce:%d\n", args.WorkID, c.Stage, reply.NReduce, c.nReduce)
 			//fmt.Printf("AssignTask.Map:c.WorkerList:%d,c.TaskChannel:%d\n", len(c.WorkerList), len(c.TaskChannel))
 		}
@@ -195,8 +195,8 @@ func (c *Coordinator) AssignTask(args *ArgsWorkID, reply *Reply) error {
 			//delete(c.WaitChannel,args.WorkID)
 			c.WorkerList[string(reduceID)] = args.WorkID
 			c.TaskList[string(reduceID)] = int(args.WorkID)
-			//go c.CheckTimeOut(c.Stage, reduceID)
 			mu.Unlock()
+			//go c.CheckTimeOut(c.Stage, reduceID)
 			//fmt.Println(reduceID)
 			//fmt.Printf("AssignTask.Reduce:c.WorkerList:%d,c.ReduceChannel:%d,reduceID:%d\n", len(c.WorkerList), len(c.ReduceChannel), reduceID)
 		}
@@ -291,19 +291,21 @@ func (c *Coordinator) CheckTimeOut(stage int, msg interface{}) {
 	if stage == Map {
 		filename := msg.(string)
 		mu.Lock()
-		startTime := c.WorkerList[filename]
-		if time.Now().Unix()-startTime > 10 {
+		_, ok := c.WorkerList[filename]
+		if ok {
 			c.TaskChannel <- filename
 		}
 		mu.Unlock()
+		return
 	} else if stage == Reduce {
 		reduceID := msg.(int)
 		mu.Lock()
-		startTime := c.WorkerList[string(reduceID)]
-		if time.Now().Unix()-startTime > 10 {
+		_, ok := c.WorkerList[string(reduceID)]
+		if ok {
 			c.ReduceChannel <- reduceID
 		}
 		mu.Unlock()
+		return
 	} else if c.Stage == Done {
 		return
 	}
