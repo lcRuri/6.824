@@ -70,7 +70,19 @@ type Raft struct {
 //LeadersState 选举后要重新初始化
 type LeadersState struct {
 	NextIndex  []int //下一个日志条目的索引 猜测是不是原来存leader的所有命令
-	MatchIndex int   //最高日志条目索引 初始为0 单调增
+	MatchIndex []int //最高日志条目索引 初始为0 单调增
+}
+
+//ServerState Server的状态
+type ServerState struct {
+	//Persistent state
+	CurrentTerm int      //server能看到的最新任期
+	VoteFor     int      //候选者Id(在当前任期里面收到的投票，没有为null)
+	Logs        []string //日志条目 每个日志条目包含对状态机的命令当日志从leader那接收到
+	//Volatile State
+	CommitIndex int //已知的索引最高的日志条目将被提交
+	LastApplied int //被应用的状态机索引最高的日志条目
+
 }
 
 // return currentTerm and whether this server
@@ -163,9 +175,24 @@ type RequestVoteReply struct {
 	VoteGranted bool //投票信息是否收到 true表示收到
 }
 
+type AppendEntriesRPC struct {
+	Term         int
+	LeaderId     int
+	PreLogIndex  int
+	preLogTerm   int
+	Entries      []string
+	LeaderCommit int
+}
+
+type ReceiveEntriesRPC struct {
+	Term    int
+	Success bool
+}
+
 //
 // example RequestVote RPC handler.
 //
+//请求投票 即发起投票请求
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 }
