@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"log"
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,12 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+const (
+	Leader = iota + 1
+	Candidate
+	Follower
+)
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -66,7 +73,10 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	//图2描述了Raft服务器必须维护的状态。
-	raftState *RaftState
+	State       int //当前节点的身份
+	CurrentTerm int //server能看到的最新任期
+	VoteFor     int //候选者Id(在当前任期里面收到的投票，没有为null)
+	updatedTime time.Time
 }
 
 type RaftState struct {
@@ -83,9 +93,7 @@ type LeadersState struct {
 //ServerState Server的状态
 type ServerState struct {
 	//Persistent state
-	CurrentTerm int      //server能看到的最新任期
-	VoteFor     int      //候选者Id(在当前任期里面收到的投票，没有为null)
-	Logs        []string //日志条目 每个日志条目包含对状态机的命令当日志从leader那接收到
+	Logs []string //日志条目 每个日志条目包含对状态机的命令当日志从leader那接收到
 	//Volatile State
 	CommitIndex int //已知的索引最高的日志条目将被提交
 	LastApplied int //被应用的状态机索引最高的日志条目
@@ -203,6 +211,12 @@ type ReceiveEntriesRPC struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	//某个节点请求投票，需要分发到这个网络里面的所有节点
+	rf.mu.Lock()
+	for i := 0; i < len(rf.peers); i++ {
+		log.Printf("[%d] sending request vote to %d", i, args.CandidateId)
+	}
+	rf.mu.Unlock()
+
 }
 
 //发送RequestVote RPC到服务器的示例代码。
@@ -249,6 +263,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	rf.mu.Lock()
+	//更改自己的身份
+	rf.State = Candidate
+	//投票给自己
+	rf.VoteFor = rf.me
+	rf.mu.Unlock()
+	log.Printf("[%d] attempting an election at term %d", rf.me, rf.CurrentTerm)
+	//需要进行群发
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -287,12 +309,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
 // need for a lock.
-//
+//测试人员不会在每次测试后停止由Raft创建的程序，
+//但是它调用Kill()方法。你的代码可以使用killed()来检查Kill()是否被调用。atomic的使用避免了对锁的需求。
 // the issue is that long-running goroutines use memory and may chew
 // up CPU time, perhaps causing later tests to fail and generating
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
-//
+//问题是长时间运行的gorout使用内存，可能会占用CPU时间，可能会导致以后的测试失败，并产生令人困惑的调试输出。
+//任何具有长时间循环的goroutine都应该调用killed()来检查它是否应该停止。
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
@@ -304,14 +328,22 @@ func (rf *Raft) killed() bool {
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
+//如果这位peers没有收到，他就会开始新的选举
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
+		//你的代码在这里检查是否领导人选举应该开始和随机睡眠时间使用
 		// time.Sleep().
-
+		term := rf.CurrentTerm + 1
+		args := &RequestVoteArgs{
+			Term:        term,
+			CandidateId: rf.me,
+		}
+		reply := &RequestVoteReply{}
+		//当前节点进入选举
+		rf.sendRequestVote(rf.me, args, reply)
 	}
 }
 
@@ -337,16 +369,22 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		peers:     peers,
 		persister: persister,
 		me:        me,
-		dead:      0,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.State = Follower
+	rf.CurrentTerm = 0
+	rf.VoteFor = -1
+	rf.updatedTime = time.Now()
 
 	// initialize from state persisted before a crash
+	//在崩溃前持续从状态初始化
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
+	//启动自动Goroutine以开始选举
+	//进行领导在选举
 	go rf.ticker()
-
+	DPrintf("%d init", rf.me)
 	return rf
 }
