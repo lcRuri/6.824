@@ -19,6 +19,8 @@ package raft
 
 import (
 	"log"
+	"math/rand"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -211,12 +213,18 @@ type ReceiveEntriesRPC struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	//某个节点请求投票，需要分发到这个网络里面的所有节点
+	//网络中的节点调用了这个方法，希望得到投票
 	rf.mu.Lock()
-	for i := 0; i < len(rf.peers); i++ {
-		log.Printf("[%d] sending request vote to %d", i, args.CandidateId)
+	log.Printf("[%d] sending request vote to %d", rf.me, args.CandidateId)
+	if rf.VoteFor == -1 && rf.CurrentTerm < args.Term {
+		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
+		rf.VoteFor = args.CandidateId
+		rf.CurrentTerm = args.Term
+		reply.VoteGranted = true
 	}
 	rf.mu.Unlock()
 
+	return
 }
 
 //发送RequestVote RPC到服务器的示例代码。
@@ -263,15 +271,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	rf.mu.Lock()
-	//更改自己的身份
-	rf.State = Candidate
-	//投票给自己
-	rf.VoteFor = rf.me
-	rf.mu.Unlock()
-	log.Printf("[%d] attempting an election at term %d", rf.me, rf.CurrentTerm)
+
 	//需要进行群发
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	if reply.VoteGranted == false {
+		return false
+	}
+	//看看收到的选票结果
 	return ok
 }
 
@@ -328,22 +334,64 @@ func (rf *Raft) killed() bool {
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
-//如果这位peers没有收到，他就会开始新的选举
 // heartsbeats recently.
+//如果这位peers没有收到心跳，他就会开始新的选举
 func (rf *Raft) ticker() {
+	//在节点没有死亡的情况下
 	for rf.killed() == false {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		//你的代码在这里检查是否领导人选举应该开始和随机睡眠时间使用
-		// time.Sleep().
-		term := rf.CurrentTerm + 1
+		//如果收到心跳的包，则为true，表示现在还有领导者，不进入选举，否则为false，进入选举
+		received := true
+		//监测是否收到心跳
+		go func() {
+
+		}()
+		for received {
+			sleepTime := rand.Intn(150) + 150
+			time.Sleep(time.Millisecond * time.Duration(sleepTime))
+		}
+		rf.mu.Lock()
 		args := &RequestVoteArgs{
-			Term:        term,
+			Term:        rf.CurrentTerm + 1,
 			CandidateId: rf.me,
 		}
 		reply := &RequestVoteReply{}
+		//更改自己的身份
+		rf.State = Candidate
+		//投票给自己
+		rf.VoteFor = rf.me
+		rf.mu.Unlock()
+		votes := 1
 		//当前节点进入选举
-		rf.sendRequestVote(rf.me, args, reply)
+		//sends out Request Vote messages to other nodes.
+		log.Printf("[%d] attempting an election at term %d", rf.me, rf.CurrentTerm)
+		for peerId, _ := range rf.peers {
+			if peerId == rf.me {
+				continue
+			}
+			go func() {
+				ok := rf.sendRequestVote(peerId, args, reply)
+				rf.mu.Lock()
+				if ok {
+					if reply.VoteGranted == true {
+						votes++
+						log.Printf("[%d] got vote from %d", rf.me, peerId)
+					}
+				} else {
+					return
+				}
+
+				if votes > len(rf.peers) {
+					return
+				}
+				log.Printf("[%d] we got enough votes, we are now leader (currentTerm=%d)", rf.me, rf.CurrentTerm)
+				rf.State = Leader
+				rf.mu.Unlock()
+			}()
+		}
+
 	}
 }
 
