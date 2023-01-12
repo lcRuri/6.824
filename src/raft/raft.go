@@ -79,7 +79,7 @@ type Raft struct {
 	CurrentTerm int //server能看到的最新任期
 	VoteFor     int //候选者Id(在当前任期里面收到的投票，没有为null)
 	updatedTime time.Time
-	received    bool
+	waitTime    chan int
 }
 
 type RaftState struct {
@@ -345,19 +345,18 @@ func (rf *Raft) ticker() {
 		//你的代码在这里检查是否领导人选举应该开始和随机睡眠时间使用
 		//如果收到心跳的包，则为true，表示现在还有领导者，不进入选举，否则为false，进入选举
 		//第一次需要等待
-		rf.received = true
+		rf.waitTime <- rand.Intn(150) + 150
 		//监测是否收到心跳
-		for rf.received {
-			sleepTime := rand.Intn(150) + 150
+		go rf.Listen()
+		//等待过程中没有收到leader的心跳或者选举的，发起选举
+		for len(rf.waitTime) != 0 {
+			sleepTime := <-rf.waitTime
+			log.Printf("[%d] waitTime is:%d, len rf.waitTime:%d", rf.me, sleepTime, len(rf.waitTime))
 			time.Sleep(time.Millisecond * time.Duration(sleepTime))
-			//等待过程中没有收到leader的心跳或者选举的，发起选举
-			rf.received = false
 		}
 		rf.mu.Lock()
 		//更改自己的身份
 		rf.State = Candidate
-		go rf.Listen()
-		rf.CurrentTerm = rf.CurrentTerm + 1
 		//投票给自己
 		rf.VoteFor = rf.me
 		args := &RequestVoteArgs{
@@ -370,7 +369,7 @@ func (rf *Raft) ticker() {
 		votes := 1
 		//当前节点进入选举
 		//sends out Request Vote messages to other nodes.
-		log.Printf("[%d] attempting an election at term %d", rf.me, rf.CurrentTerm)
+		log.Printf("[%d] attempting an election at term %d,currentTerm is:%d", rf.me, rf.CurrentTerm+1, rf.CurrentTerm)
 		for peerId, _ := range rf.peers {
 			if peerId == rf.me {
 				continue
@@ -378,20 +377,23 @@ func (rf *Raft) ticker() {
 			go func() {
 				ok := rf.sendRequestVote(peerId, args, reply)
 				rf.mu.Lock()
+
 				if ok {
 					if reply.VoteGranted == true {
 						votes++
+						if votes > len(rf.peers)/2 {
+							rf.CurrentTerm = rf.CurrentTerm + 1
+							log.Printf("[%d] we got enough votes, we are now leader (currentTerm=%d)", rf.me, rf.CurrentTerm)
+							rf.State = Leader
+							rf.mu.Unlock()
+							return
+						}
 						log.Printf("[%d] got vote from %d", rf.me, peerId)
 					}
 				} else {
 					return
 				}
 
-				if votes > len(rf.peers) {
-					return
-				}
-				log.Printf("[%d] we got enough votes, we are now leader (currentTerm=%d)", rf.me, rf.CurrentTerm)
-				rf.State = Leader
 				rf.mu.Unlock()
 			}()
 		}
@@ -402,13 +404,13 @@ func (rf *Raft) ticker() {
 func (rf *Raft) Listen() {
 	//如果当前节点的状态是领导者或者候选者
 	for rf.State == Leader || rf.State == Candidate {
-		time.Sleep(10 * time.Millisecond)
 		for peerId, _ := range rf.peers {
 			if peerId == rf.me {
+				//log.Printf("%d State is %d", rf.me, rf.State)
 				continue
 			}
 			go func() {
-				args := &RequestVoteArgs{}
+				args := &RequestVoteArgs{CandidateId: rf.me, Term: rf.CurrentTerm}
 				reply := &RequestVoteReply{}
 				rf.peers[peerId].Call("Raft.Heart", args, reply)
 			}()
@@ -416,14 +418,21 @@ func (rf *Raft) Listen() {
 		}
 	}
 
+	//for rf.State == Follower {
+	//	if rf.received {
+	//
+	//	}
+	//}
+
 }
 
 //Heart 发送心跳
-func (rf *Raft) Heart(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) Heart(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.received = true
-	return true
+	rf.waitTime <- rand.Intn(150) + 150
+	//log.Printf("[%d] receive from leader:%d", rf.me, args.CandidateId)
+	return
 }
 
 //
@@ -448,7 +457,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		peers:     peers,
 		persister: persister,
 		me:        me,
-		received:  false,
+		waitTime:  make(chan int, 1),
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
