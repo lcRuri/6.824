@@ -63,13 +63,13 @@ package labrpc
 //
 //net:= MakeNetwork()——保存网络，客户端，服务器。
 //end:= net.MakeEnd(endname)——创建一个客户端端点，与一个服务器通信。
-//网AddServer(servername, server)——将一个命名服务器添加到网络。
-//net.DeleteServer(servername)——删除命名服务器。
-//网Connect(endname, servername)——将客户端连接到服务器。
-//网Enable(endname, enabled)——启用/禁用客户端。
+//NetAddServer(servername, server)——将一个命名服务器添加到网络。
+//Net.DeleteServer(servername)——删除命名服务器。
+//NetConnect(endname, servername)——将客户端连接到服务器。
+//NetEnable(endname, enabled)——启用/禁用客户端。
 //net.Reliable(bool)——false表示丢弃/延迟消息
 //
-//end.Call(“筏。AppendEntries"， &args， &reply)——发送一个RPC，等待回复。
+//end.Call(“Raft.AppendEntries"， &args， &reply)——发送一个RPC，等待回复。
 //“Raft”是要调用的服务器结构的名称。
 //AppendEntries是要调用的方法的名称。
 //Call()返回true，表示服务器执行了请求
@@ -145,7 +145,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 
 	//
 	// send the request.
-	//
+	//发送请求
 	select {
 	case e.ch <- req:
 		// the request has been sent.

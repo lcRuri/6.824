@@ -79,6 +79,7 @@ type Raft struct {
 	CurrentTerm int //server能看到的最新任期
 	VoteFor     int //候选者Id(在当前任期里面收到的投票，没有为null)
 	updatedTime time.Time
+	received    bool
 }
 
 type RaftState struct {
@@ -192,7 +193,7 @@ type RequestVoteReply struct {
 	VoteGranted bool //投票信息是否收到 true表示收到
 }
 
-type AppendEntriesRPC struct {
+type AppendEntries struct {
 	Term         int
 	LeaderId     int
 	PreLogIndex  int
@@ -343,25 +344,28 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		//你的代码在这里检查是否领导人选举应该开始和随机睡眠时间使用
 		//如果收到心跳的包，则为true，表示现在还有领导者，不进入选举，否则为false，进入选举
-		received := true
+		//第一次需要等待
+		rf.received = true
 		//监测是否收到心跳
-		go func() {
-
-		}()
-		for received {
+		for rf.received {
 			sleepTime := rand.Intn(150) + 150
 			time.Sleep(time.Millisecond * time.Duration(sleepTime))
+			//等待过程中没有收到leader的心跳或者选举的，发起选举
+			rf.received = false
 		}
 		rf.mu.Lock()
+		//更改自己的身份
+		rf.State = Candidate
+		go rf.Listen()
+		rf.CurrentTerm = rf.CurrentTerm + 1
+		//投票给自己
+		rf.VoteFor = rf.me
 		args := &RequestVoteArgs{
-			Term:        rf.CurrentTerm + 1,
+			Term:        rf.CurrentTerm,
 			CandidateId: rf.me,
 		}
 		reply := &RequestVoteReply{}
-		//更改自己的身份
-		rf.State = Candidate
-		//投票给自己
-		rf.VoteFor = rf.me
+
 		rf.mu.Unlock()
 		votes := 1
 		//当前节点进入选举
@@ -395,6 +399,33 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) Listen() {
+	//如果当前节点的状态是领导者或者候选者
+	for rf.State == Leader || rf.State == Candidate {
+		time.Sleep(10 * time.Millisecond)
+		for peerId, _ := range rf.peers {
+			if peerId == rf.me {
+				continue
+			}
+			go func() {
+				args := &RequestVoteArgs{}
+				reply := &RequestVoteReply{}
+				rf.peers[peerId].Call("Raft.Heart", args, reply)
+			}()
+
+		}
+	}
+
+}
+
+//Heart 发送心跳
+func (rf *Raft) Heart(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.received = true
+	return true
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -417,6 +448,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		peers:     peers,
 		persister: persister,
 		me:        me,
+		received:  false,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
