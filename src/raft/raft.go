@@ -217,7 +217,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//某个节点请求投票，需要分发到这个网络里面的所有节点
 	//网络中的节点调用了这个方法，希望得到投票
 	rf.mu.Lock()
-	if rf.VoteFor == -1 && rf.CurrentTerm == args.Term {
+	if rf.VoteFor == -1 && rf.CurrentTerm <= args.Term {
 		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
 		rf.VoteFor = args.CandidateId
 		rf.CurrentTerm = rf.CurrentTerm + 1
@@ -346,7 +346,7 @@ func (rf *Raft) ticker() {
 		//你的代码在这里检查是否领导人选举应该开始和随机睡眠时间使用
 		//如果收到心跳的包，则为true，表示现在还有领导者，不进入选举，否则为false，进入选举
 		//第一次需要等待
-		rf.waitTime <- rand.Intn(400) + 150
+		rf.waitTime <- rand.Intn(150) + 150
 		//监测是否收到心跳
 		go rf.Listen()
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
@@ -378,6 +378,9 @@ func (rf *Raft) ticker() {
 			log.Printf("[%d] attempting an election at term %d,currentTerm is:%d", rf.me, rf.CurrentTerm+1, rf.CurrentTerm)
 			Done := true
 			for peerId, _ := range rf.peers {
+				if rf.State == Follower {
+					break
+				}
 				if peerId == rf.me {
 					continue
 				}
@@ -399,7 +402,7 @@ func (rf *Raft) ticker() {
 							log.Printf("[%d] got vote from %d", rf.me, peerId)
 						}
 					} else {
-						log.Printf("rf.sendRequestVote(peerId, args, reply) failed")
+						log.Printf("rf[%d].sendRequestVote(%d, args, reply) failed", rf.me, peerId)
 						rf.mu.Unlock()
 						return
 					}
@@ -407,9 +410,9 @@ func (rf *Raft) ticker() {
 					rf.mu.Unlock()
 				}()
 			}
-			//if votes <= len(rf.peers)/2 {
-			//	rf.State = Follower
-			//}
+			if votes <= len(rf.peers)/2 {
+				rf.State = Follower
+			}
 		}
 
 	}
@@ -419,6 +422,9 @@ func (rf *Raft) Listen() {
 	for rf.killed() == false {
 		for rf.State == Leader {
 			for peerId, _ := range rf.peers {
+				if rf.State != Leader {
+					break
+				}
 				if peerId == rf.me {
 					continue
 				}
@@ -427,8 +433,13 @@ func (rf *Raft) Listen() {
 						Term:     rf.CurrentTerm,
 						LeaderId: rf.me,
 					}
-					reply := &RequestVoteReply{}
-					go rf.peers[peerId].Call("Raft.LeaderHeart", args, reply)
+					reply := &RequestVoteReply{Term: -1}
+					time.Sleep(1 * time.Millisecond)
+					rf.peers[peerId].Call("Raft.LeaderHeart", args, reply)
+					if reply.Term != -1 && reply.Term > rf.CurrentTerm {
+						rf.CurrentTerm = reply.Term
+						rf.State = Follower
+					}
 					//log.Printf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 				}()
 
@@ -443,6 +454,7 @@ func (rf *Raft) Listen() {
 				func() {
 					args := &RequestVoteArgs{CandidateId: rf.me}
 					reply := &RequestVoteReply{}
+					time.Sleep(1 * time.Millisecond)
 					go rf.peers[peerId].Call("Raft.CandidateHeart", args, reply)
 					//log.Printf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 				}()
@@ -463,7 +475,17 @@ func (rf *Raft) Listen() {
 func (rf *Raft) CandidateHeart(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.waitTime <- rand.Intn(400) + 150
+	if len(rf.waitTime) == 0 {
+		rf.waitTime <- rand.Intn(150) + 150
+	}
+	//两个实例几乎同时进入请求选举自己为领导者
+	//向当前序号小的妥协,并且自己也要同时是候选者
+	//这样可以迫使其中一个退出
+	//因为自己不会向自己发起心跳
+	if args.CandidateId < rf.me && rf.State == Candidate {
+		rf.State = Follower
+		rf.VoteFor = -1
+	}
 	//log.Printf("[%d] receive from leader:%d", rf.me, args.CandidateId)
 	return
 }
@@ -471,10 +493,16 @@ func (rf *Raft) CandidateHeart(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.waitTime <- rand.Intn(400) + 150
-	if args.Term > rf.CurrentTerm {
+	if len(rf.waitTime) == 0 {
+		rf.waitTime <- rand.Intn(150) + 150
+	}
+	if args.Term >= rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
+		//重置当前的投票选择
+		rf.VoteFor = -1
+	} else if args.Term < rf.CurrentTerm { //如果leader的term小于当前的，leader可能出现了问题，变为foller
+		reply.Term = rf.CurrentTerm
 	}
 	//log.Printf("[%d] receive from leader:%d", rf.me, args.CandidateId)
 	return

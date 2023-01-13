@@ -63,6 +63,7 @@ func TestReElection2A(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
+	// 如果领导人断开连接，则应选举新的领导人。
 	cfg.disconnect(leader1)
 	log.Printf("detach leader [%d] from the net.", leader1)
 	cfg.checkOneLeader()
@@ -70,7 +71,9 @@ func TestReElection2A(t *testing.T) {
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader. and the old leader
 	// should switch to follower.
+	//如果旧领导重新加入，那不应该打扰新领导。而老领导应该换成追随者。
 	cfg.connect(leader1)
+	log.Printf("old leader rejoins")
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no new leader should
