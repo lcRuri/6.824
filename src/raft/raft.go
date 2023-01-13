@@ -407,6 +407,9 @@ func (rf *Raft) ticker() {
 					rf.mu.Unlock()
 				}()
 			}
+			//if votes <= len(rf.peers)/2 {
+			//	rf.State = Follower
+			//}
 		}
 
 	}
@@ -425,7 +428,7 @@ func (rf *Raft) Listen() {
 						LeaderId: rf.me,
 					}
 					reply := &RequestVoteReply{}
-					rf.peers[peerId].Call("Raft.LeaderHeart", args, reply)
+					go rf.peers[peerId].Call("Raft.LeaderHeart", args, reply)
 					//log.Printf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 				}()
 
@@ -440,7 +443,7 @@ func (rf *Raft) Listen() {
 				func() {
 					args := &RequestVoteArgs{CandidateId: rf.me}
 					reply := &RequestVoteReply{}
-					rf.peers[peerId].Call("Raft.CandidateHeart", args, reply)
+					go rf.peers[peerId].Call("Raft.CandidateHeart", args, reply)
 					//log.Printf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 				}()
 
@@ -499,7 +502,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		peers:     peers,
 		persister: persister,
 		me:        me,
-		waitTime:  make(chan int, 2),
+		waitTime:  make(chan int, 1),
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
