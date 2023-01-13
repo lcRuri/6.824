@@ -469,6 +469,7 @@ func (cfg *config) checkTerms() int {
 			xterm, _ := cfg.rafts[i].GetState()
 			if term == -1 {
 				term = xterm
+				//cfg.t.Fatalf("node[%d] xterm is:%d", i, xterm)
 			} else if term != xterm {
 				cfg.t.Fatalf("servers disagree on term")
 			}
