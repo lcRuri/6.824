@@ -65,7 +65,7 @@ func TestReElection2A(t *testing.T) {
 	// if the leader disconnects, a new one should be elected.
 	// 如果领导人断开连接，则应选举新的领导人。
 	cfg.disconnect(leader1)
-	log.Printf("detach leader [%d] from the net.", leader1)
+	//log.Printf("detach leader [%d] from the net.", leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
@@ -78,6 +78,7 @@ func TestReElection2A(t *testing.T) {
 
 	// if there's no quorum, no new leader should
 	// be elected.
+	//如果没有法定人数，则不应选举新的领导人。
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)

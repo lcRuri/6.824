@@ -80,6 +80,7 @@ type Raft struct {
 	VoteFor     int //候选者Id(在当前任期里面收到的投票，没有为null)
 	updatedTime time.Time
 	waitTime    chan int
+	//LeaderId    int
 }
 
 type RaftState struct {
@@ -216,15 +217,29 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	//某个节点请求投票，需要分发到这个网络里面的所有节点
 	//网络中的节点调用了这个方法，希望得到投票
+	if rf.State != Follower {
+		return
+	}
 	rf.mu.Lock()
-	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm < args.Term {
-
+	//if rf.State == Candidate {
+	//	if args.CandidateId < rf.me {
+	//		rf.State = Follower
+	//	}
+	//}
+	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm == args.Term-1 {
 		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
 		rf.VoteFor = args.CandidateId
 		rf.CurrentTerm = rf.CurrentTerm + 1
-		rf.waitTime <- rand.Intn(150) + 150
+		if len(rf.waitTime) == 0 {
+			rf.waitTime <- rand.Intn(200) + 200
+		}
 		reply.VoteGranted = true
-		log.Printf("[%d] sending request vote to %d", rf.me, args.CandidateId)
+		log.Printf("[%d] sending granted vote to %d", rf.me, args.CandidateId)
+	} else if rf.CurrentTerm == args.Term {
+		if len(rf.waitTime) == 0 {
+			rf.waitTime <- rand.Intn(200) + 200
+		}
+		reply.VoteGranted = false
 	}
 	rf.mu.Unlock()
 
@@ -348,20 +363,22 @@ func (rf *Raft) ticker() {
 		//你的代码在这里检查是否领导人选举应该开始和随机睡眠时间使用
 		//如果收到心跳的包，则为true，表示现在还有领导者，不进入选举，否则为false，进入选举
 		//第一次需要等待
-		if rf.State != Leader {
-			rf.waitTime <- rand.Intn(150) + 150
+		if len(rf.waitTime) == 0 {
+			rf.waitTime <- rand.Intn(200) + 200
 		}
+
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
 		for len(rf.waitTime) != 0 && rf.State != Leader {
 			sleepTime, ok := <-rf.waitTime
 			if !ok {
 				log.Printf("[%d] rf.waitTime blocked", rf.me)
 			}
+			rf.State = Follower
 			log.Printf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
 			time.Sleep(time.Millisecond * time.Duration(sleepTime))
 		}
 
-		if rf.State != Leader {
+		if rf.State == Follower && len(rf.waitTime) == 0 {
 			rf.mu.Lock()
 			//更改自己的身份
 			rf.State = Candidate
@@ -381,10 +398,10 @@ func (rf *Raft) ticker() {
 			log.Printf("[%d] attempting an election at term %d", rf.me, rf.CurrentTerm)
 			Done := true
 			for peerId, _ := range rf.peers {
-				if rf.State == Follower {
-					log.Printf("Candidate become Follower")
-					break
-				}
+				//if rf.State == Follower {
+				//	log.Printf("Candidate%d become Follower", rf.me)
+				//	break
+				//}
 				if peerId == rf.me {
 					continue
 				}
@@ -414,9 +431,9 @@ func (rf *Raft) ticker() {
 					rf.mu.Unlock()
 				}()
 			}
-			//if votes <= len(rf.peers)/2 {
-			//	rf.State = Follower
-			//}
+			if votes <= len(rf.peers)/2 {
+				rf.State = Follower
+			}
 		}
 
 	}
@@ -432,7 +449,6 @@ func (rf *Raft) Listen() {
 				if peerId == rf.me {
 					continue
 				}
-				time.Sleep(5 * time.Millisecond)
 				func() {
 					args := &AppendEntries{
 						Term:     rf.CurrentTerm,
@@ -444,11 +460,13 @@ func (rf *Raft) Listen() {
 					//这里的ok是指发送rpc成功，与reply里面的success无关
 					if ok {
 						if reply.Term > rf.CurrentTerm {
+							rf.mu.Lock()
 							rf.CurrentTerm = reply.Term
 							rf.State = Follower
 							if len(rf.waitTime) == 0 {
-								rf.waitTime <- rand.Intn(150) + 150
+								rf.waitTime <- rand.Intn(200) + 200
 							}
+							rf.mu.Unlock()
 							log.Printf("%d reconnect to net,not leader now", rf.me)
 						}
 
@@ -456,25 +474,25 @@ func (rf *Raft) Listen() {
 
 					//log.Printf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 				}()
-
+				time.Sleep(100 * time.Millisecond)
 			}
 		}
 		//如果当前节点的状态是领导者或者候选者
-		for rf.State == Candidate {
-			for peerId, _ := range rf.peers {
-				if peerId == rf.me {
-					continue
-				}
-				func() {
-					args := &RequestVoteArgs{CandidateId: rf.me}
-					reply := &RequestVoteReply{}
-					time.Sleep(1 * time.Millisecond)
-					go rf.peers[peerId].Call("Raft.CandidateHeart", args, reply)
-					//log.Printf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
-				}()
-
-			}
-		}
+		//for rf.State == Candidate {
+		//	for peerId, _ := range rf.peers {
+		//		if peerId == rf.me {
+		//			continue
+		//		}
+		//		func() {
+		//			args := &RequestVoteArgs{CandidateId: rf.me}
+		//			reply := &RequestVoteReply{}
+		//			time.Sleep(1 * time.Millisecond)
+		//			rf.peers[peerId].Call("Raft.CandidateHeart", args, reply)
+		//			//log.Printf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
+		//		}()
+		//
+		//	}
+		//}
 
 	}
 
@@ -490,38 +508,36 @@ func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries
 }
 
 //CandidateHeart 发送心跳
-func (rf *Raft) CandidateHeart(args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.mu.Lock()
-	//两个实例几乎同时进入请求选举自己为领导者
-	//向当前序号小的妥协,并且自己也要同时是候选者
-	//这样可以迫使其中一个退出
-	//因为自己不会向自己发起心跳
-	if args.CandidateId < rf.me && rf.State == Candidate {
-		rf.State = Follower
-		rf.VoteFor = -1
-	}
-	rf.mu.Unlock()
-	if len(rf.waitTime) == 0 {
-		rf.waitTime <- rand.Intn(150) + 150
-	}
-
-	//log.Printf("[%d] receive from leader:%d", rf.me, args.CandidateId)
-	return
-}
+//func (rf *Raft) CandidateHeart(args *RequestVoteArgs, reply *RequestVoteReply) {
+//	rf.mu.Lock()
+//	//两个实例几乎同时进入请求选举自己为领导者
+//	//向当前序号小的妥协,并且自己也要同时是候选者
+//	//这样可以迫使其中一个退出
+//	//因为自己不会向自己发起心跳
+//	if args.CandidateId < rf.me && rf.State == Candidate {
+//		rf.State = Follower
+//		rf.VoteFor = -1
+//	}
+//	rf.mu.Unlock()
+//	if len(rf.waitTime) == 0 {
+//		rf.waitTime <- rand.Intn(150) + 150
+//	}
+//	//log.Printf("[%d] receive from leader:%d", rf.me, args.CandidateId)
+//	return
+//}
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
+	if len(rf.waitTime) == 0 {
+		rf.waitTime <- rand.Intn(200) + 200
+	}
 	rf.mu.Lock()
 	if args.Term >= rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
 		//重置当前的投票选择
 		rf.VoteFor = -1
-		if len(rf.waitTime) == 0 {
-			rf.waitTime <- rand.Intn(150) + 150
-		}
 		//reply.Success = true
-
-		//log.Printf("%d receive leaderheart from %d", rf.me, args.LeaderId)
+		log.Printf("%d receive leaderheart from %d", rf.me, args.LeaderId)
 	} else if args.Term < rf.CurrentTerm { //如果leader的term小于当前的，leader可能出现了问题，变为foller
 		reply.Term = rf.CurrentTerm
 		//reply.Success = false
@@ -556,6 +572,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		persister: persister,
 		me:        me,
 		waitTime:  make(chan int, 1),
+		//LeaderId: -1,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
