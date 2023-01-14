@@ -203,7 +203,7 @@ type AppendEntries struct {
 	LeaderCommit int
 }
 
-type ReceiveEntriesRPC struct {
+type ReceiveEntries struct {
 	Term    int
 	Success bool
 }
@@ -217,10 +217,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//某个节点请求投票，需要分发到这个网络里面的所有节点
 	//网络中的节点调用了这个方法，希望得到投票
 	rf.mu.Lock()
-	if rf.VoteFor == -1 && rf.CurrentTerm <= args.Term {
+	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm < args.Term {
+
 		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
 		rf.VoteFor = args.CandidateId
 		rf.CurrentTerm = rf.CurrentTerm + 1
+		rf.waitTime <- rand.Intn(150) + 150
 		reply.VoteGranted = true
 		log.Printf("[%d] sending request vote to %d", rf.me, args.CandidateId)
 	}
@@ -346,25 +348,26 @@ func (rf *Raft) ticker() {
 		//你的代码在这里检查是否领导人选举应该开始和随机睡眠时间使用
 		//如果收到心跳的包，则为true，表示现在还有领导者，不进入选举，否则为false，进入选举
 		//第一次需要等待
-		rf.waitTime <- rand.Intn(150) + 150
-		//监测是否收到心跳
-		go rf.Listen()
+		if rf.State != Leader {
+			rf.waitTime <- rand.Intn(150) + 150
+		}
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
 		for len(rf.waitTime) != 0 && rf.State != Leader {
 			sleepTime, ok := <-rf.waitTime
 			if !ok {
 				log.Printf("[%d] rf.waitTime blocked", rf.me)
 			}
-			log.Printf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm)
+			log.Printf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
 			time.Sleep(time.Millisecond * time.Duration(sleepTime))
 		}
 
-		if rf.State != Candidate && rf.State != Leader {
+		if rf.State != Leader {
 			rf.mu.Lock()
 			//更改自己的身份
 			rf.State = Candidate
 			//投票给自己
 			rf.VoteFor = rf.me
+			rf.CurrentTerm = rf.CurrentTerm + 1
 			args := &RequestVoteArgs{
 				Term:        rf.CurrentTerm,
 				CandidateId: rf.me,
@@ -375,10 +378,11 @@ func (rf *Raft) ticker() {
 			votes := 1
 			//当前节点进入选举
 			//sends out Request Vote messages to other nodes.
-			log.Printf("[%d] attempting an election at term %d,currentTerm is:%d", rf.me, rf.CurrentTerm+1, rf.CurrentTerm)
+			log.Printf("[%d] attempting an election at term %d", rf.me, rf.CurrentTerm)
 			Done := true
 			for peerId, _ := range rf.peers {
 				if rf.State == Follower {
+					log.Printf("Candidate become Follower")
 					break
 				}
 				if peerId == rf.me {
@@ -386,6 +390,7 @@ func (rf *Raft) ticker() {
 				}
 				func() {
 					ok := rf.sendRequestVote(peerId, args, reply)
+					log.Printf("rf[%d].sendRequestVote([%d], args, reply)", rf.me, peerId)
 					rf.mu.Lock()
 
 					if ok {
@@ -393,7 +398,6 @@ func (rf *Raft) ticker() {
 							votes++
 							if Done && votes > len(rf.peers)/2 {
 								rf.State = Leader
-								rf.CurrentTerm = rf.CurrentTerm + 1
 								log.Printf("[%d] we got enough votes, we are now leader (currentTerm=%d)", rf.me, rf.CurrentTerm)
 								Done = false
 								rf.mu.Unlock()
@@ -410,9 +414,9 @@ func (rf *Raft) ticker() {
 					rf.mu.Unlock()
 				}()
 			}
-			if votes <= len(rf.peers)/2 {
-				rf.State = Follower
-			}
+			//if votes <= len(rf.peers)/2 {
+			//	rf.State = Follower
+			//}
 		}
 
 	}
@@ -428,18 +432,28 @@ func (rf *Raft) Listen() {
 				if peerId == rf.me {
 					continue
 				}
+				time.Sleep(5 * time.Millisecond)
 				func() {
 					args := &AppendEntries{
 						Term:     rf.CurrentTerm,
 						LeaderId: rf.me,
 					}
-					reply := &RequestVoteReply{Term: -1}
-					time.Sleep(1 * time.Millisecond)
-					rf.peers[peerId].Call("Raft.LeaderHeart", args, reply)
-					if reply.Term != -1 && reply.Term > rf.CurrentTerm {
-						rf.CurrentTerm = reply.Term
-						rf.State = Follower
+					reply := &ReceiveEntries{Term: -1}
+					//log.Printf("LeaderHeart %d to %d", rf.me, peerId)
+					ok := rf.sendHeart(peerId, args, reply)
+					//这里的ok是指发送rpc成功，与reply里面的success无关
+					if ok {
+						if reply.Term > rf.CurrentTerm {
+							rf.CurrentTerm = reply.Term
+							rf.State = Follower
+							if len(rf.waitTime) == 0 {
+								rf.waitTime <- rand.Intn(150) + 150
+							}
+							log.Printf("%d reconnect to net,not leader now", rf.me)
+						}
+
 					}
+
 					//log.Printf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 				}()
 
@@ -462,22 +476,22 @@ func (rf *Raft) Listen() {
 			}
 		}
 
-		for rf.State == Follower {
-			if rf.State != Follower {
-				break
-			}
-		}
 	}
+
+}
+
+func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries) bool {
+	ok := rf.peers[peerId].Call("Raft.LeaderHeart", args, reply)
+	if !ok {
+		return false
+	}
+	return ok
 
 }
 
 //CandidateHeart 发送心跳
 func (rf *Raft) CandidateHeart(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if len(rf.waitTime) == 0 {
-		rf.waitTime <- rand.Intn(150) + 150
-	}
 	//两个实例几乎同时进入请求选举自己为领导者
 	//向当前序号小的妥协,并且自己也要同时是候选者
 	//这样可以迫使其中一个退出
@@ -486,24 +500,35 @@ func (rf *Raft) CandidateHeart(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.State = Follower
 		rf.VoteFor = -1
 	}
+	rf.mu.Unlock()
+	if len(rf.waitTime) == 0 {
+		rf.waitTime <- rand.Intn(150) + 150
+	}
+
 	//log.Printf("[%d] receive from leader:%d", rf.me, args.CandidateId)
 	return
 }
 
-func (rf *Raft) LeaderHeart(args *AppendEntries, reply *RequestVoteReply) {
+func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if len(rf.waitTime) == 0 {
-		rf.waitTime <- rand.Intn(150) + 150
-	}
 	if args.Term >= rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
 		//重置当前的投票选择
 		rf.VoteFor = -1
+		if len(rf.waitTime) == 0 {
+			rf.waitTime <- rand.Intn(150) + 150
+		}
+		//reply.Success = true
+
+		//log.Printf("%d receive leaderheart from %d", rf.me, args.LeaderId)
 	} else if args.Term < rf.CurrentTerm { //如果leader的term小于当前的，leader可能出现了问题，变为foller
 		reply.Term = rf.CurrentTerm
+		//reply.Success = false
+
 	}
+	rf.mu.Unlock()
+
 	//log.Printf("[%d] receive from leader:%d", rf.me, args.CandidateId)
 	return
 }
@@ -547,6 +572,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	//启动自动Goroutine以开始选举
 	//进行领导在选举
 	go rf.ticker()
+	//监测是否收到心跳
+	go rf.Listen()
 	DPrintf("%d init", rf.me)
 	return rf
 }

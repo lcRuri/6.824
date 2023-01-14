@@ -73,7 +73,7 @@ func TestReElection2A(t *testing.T) {
 	// should switch to follower.
 	//如果旧领导重新加入，那不应该打扰新领导。而老领导应该换成追随者。
 	cfg.connect(leader1)
-	log.Printf("old leader rejoins")
+	log.Printf("old leader [%d] rejoins", leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no new leader should
