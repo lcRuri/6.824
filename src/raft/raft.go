@@ -217,31 +217,43 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	//某个节点请求投票，需要分发到这个网络里面的所有节点
 	//网络中的节点调用了这个方法，希望得到投票
-	if rf.State != Follower {
+	if rf.State == Leader {
+		log.Printf("leader%d do not vote to %d", rf.me, args.CandidateId)
 		return
 	}
-	rf.mu.Lock()
+
 	//if rf.State == Candidate {
 	//	if args.CandidateId < rf.me {
 	//		rf.State = Follower
 	//	}
 	//}
-	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm == args.Term-1 {
+	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm < args.Term {
+		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+		rf.mu.Lock()
 		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
 		rf.VoteFor = args.CandidateId
 		rf.CurrentTerm = rf.CurrentTerm + 1
-		if len(rf.waitTime) == 0 {
-			rf.waitTime <- rand.Intn(200) + 200
-		}
+		rf.State = Follower
 		reply.VoteGranted = true
 		log.Printf("[%d] sending granted vote to %d", rf.me, args.CandidateId)
-	} else if rf.CurrentTerm == args.Term {
-		if len(rf.waitTime) == 0 {
-			rf.waitTime <- rand.Intn(200) + 200
+		rf.mu.Unlock()
+		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+	} /**
+	else if rf.CurrentTerm == args.Term {
+		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+		rf.mu.Lock()
+		//要么已经投过票，要么就是也变成候选者
+		if rf.State == Candidate && rf.me > args.CandidateId {
+			rf.VoteFor = args.CandidateId
+			reply.VoteGranted = true
+			rf.State = Follower
+			log.Printf("%d and %d Candidate at same time,but %d send to %d,become%d", rf.me, args.CandidateId, rf.me, args.CandidateId, rf.State)
+		} else {
+			reply.VoteGranted = false
 		}
-		reply.VoteGranted = false
+		rf.mu.Unlock()
 	}
-	rf.mu.Unlock()
+	**/
 
 	return
 }
@@ -363,9 +375,8 @@ func (rf *Raft) ticker() {
 		//你的代码在这里检查是否领导人选举应该开始和随机睡眠时间使用
 		//如果收到心跳的包，则为true，表示现在还有领导者，不进入选举，否则为false，进入选举
 		//第一次需要等待
-		if len(rf.waitTime) == 0 {
-			rf.waitTime <- rand.Intn(200) + 200
-		}
+
+		rf.waitTime <- rand.Intn(150) + 150
 
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
 		for len(rf.waitTime) != 0 && rf.State != Leader {
@@ -373,12 +384,12 @@ func (rf *Raft) ticker() {
 			if !ok {
 				log.Printf("[%d] rf.waitTime blocked", rf.me)
 			}
-			rf.State = Follower
-			log.Printf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
 			time.Sleep(time.Millisecond * time.Duration(sleepTime))
+			//log.Printf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
+
 		}
 
-		if rf.State == Follower && len(rf.waitTime) == 0 {
+		if rf.State != Leader && len(rf.waitTime) == 0 {
 			rf.mu.Lock()
 			//更改自己的身份
 			rf.State = Candidate
@@ -398,15 +409,19 @@ func (rf *Raft) ticker() {
 			log.Printf("[%d] attempting an election at term %d", rf.me, rf.CurrentTerm)
 			Done := true
 			for peerId, _ := range rf.peers {
-				//if rf.State == Follower {
-				//	log.Printf("Candidate%d become Follower", rf.me)
-				//	break
-				//}
+				if rf.State == Follower {
+					log.Printf("Candidate%d become Follower", rf.me)
+					break
+				}
 				if peerId == rf.me {
 					continue
 				}
 				func() {
 					ok := rf.sendRequestVote(peerId, args, reply)
+					if rf.State == Follower {
+						log.Printf("Candidate%d become Follower", rf.me)
+						return
+					}
 					log.Printf("rf[%d].sendRequestVote([%d], args, reply)", rf.me, peerId)
 					rf.mu.Lock()
 
@@ -431,8 +446,11 @@ func (rf *Raft) ticker() {
 					rf.mu.Unlock()
 				}()
 			}
-			if votes <= len(rf.peers)/2 {
-				rf.State = Follower
+			if Done == true {
+				log.Printf("Candidate%d failed", rf.me)
+				//rf.mu.Lock()
+				//rf.State = Follower
+				//rf.mu.Unlock()
 			}
 		}
 
@@ -449,12 +467,15 @@ func (rf *Raft) Listen() {
 				if peerId == rf.me {
 					continue
 				}
-				func() {
+				go func() {
+					if rf.State != Leader {
+						return
+					}
 					args := &AppendEntries{
 						Term:     rf.CurrentTerm,
 						LeaderId: rf.me,
 					}
-					reply := &ReceiveEntries{Term: -1}
+					reply := &ReceiveEntries{Term: -1, Success: false}
 					//log.Printf("LeaderHeart %d to %d", rf.me, peerId)
 					ok := rf.sendHeart(peerId, args, reply)
 					//这里的ok是指发送rpc成功，与reply里面的success无关
@@ -462,14 +483,15 @@ func (rf *Raft) Listen() {
 						if reply.Term > rf.CurrentTerm {
 							rf.mu.Lock()
 							rf.CurrentTerm = reply.Term
-							rf.State = Follower
-							if len(rf.waitTime) == 0 {
-								rf.waitTime <- rand.Intn(200) + 200
+							if reply.Success == true {
+								rf.State = Follower
+								log.Printf("%d reconnect to net,not leader now", rf.me)
 							}
+							log.Printf("%d term is %d", rf.me, rf.CurrentTerm)
+							//go func() { rf.waitTime <- rand.Intn(200) + 200 }()
 							rf.mu.Unlock()
-							log.Printf("%d reconnect to net,not leader now", rf.me)
-						}
 
+						}
 					}
 
 					//log.Printf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
@@ -527,23 +549,30 @@ func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries
 //}
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
-	if len(rf.waitTime) == 0 {
-		rf.waitTime <- rand.Intn(200) + 200
-	}
-	rf.mu.Lock()
+
+	go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+
 	if args.Term >= rf.CurrentTerm {
+		rf.mu.Lock()
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
 		//重置当前的投票选择
 		rf.VoteFor = -1
 		//reply.Success = true
 		log.Printf("%d receive leaderheart from %d", rf.me, args.LeaderId)
-	} else if args.Term < rf.CurrentTerm { //如果leader的term小于当前的，leader可能出现了问题，变为foller
+		rf.mu.Unlock()
+	} else if args.Term < rf.CurrentTerm && rf.State == Leader { //如果leader的term小于当前的，并且需要满足当前节点还是领导者，这样leader可能出现了问题，变为foller
+		rf.mu.Lock()
 		reply.Term = rf.CurrentTerm
-		//reply.Success = false
-
+		reply.Success = true
+		log.Printf("old leader need to be foller")
+		rf.mu.Unlock()
+	} else if args.Term < rf.CurrentTerm && rf.State != Leader {
+		rf.mu.Lock()
+		rf.State = Follower
+		rf.CurrentTerm = args.Term
+		rf.mu.Unlock()
 	}
-	rf.mu.Unlock()
 
 	//log.Printf("[%d] receive from leader:%d", rf.me, args.CandidateId)
 	return
