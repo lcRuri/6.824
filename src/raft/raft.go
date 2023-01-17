@@ -481,7 +481,7 @@ func (rf *Raft) Listen() {
 					continue
 				}
 				//rf.wg.Add(1)
-				go rf.Heart(peerId)
+				go rf.Heart(&peerId)
 				//rf.wg.Wait()
 				time.Sleep(10 * time.Millisecond)
 			}
@@ -507,7 +507,7 @@ func (rf *Raft) Listen() {
 
 }
 
-func (rf *Raft) Heart(peerId int) {
+func (rf *Raft) Heart(peerId *int) {
 	//rf.wg.Add(1)
 	//defer rf.wg.Done()
 	if rf.State != Leader {
@@ -519,7 +519,7 @@ func (rf *Raft) Heart(peerId int) {
 	}
 	reply := &ReceiveEntries{Term: -1, Success: false}
 	//DPrintf("LeaderHeart %d to %d", rf.me, peerId)
-	ok := rf.sendHeart(peerId, args, reply)
+	ok := rf.sendHeart(*peerId, args, reply)
 	//这里的ok是指发送rpc成功，与reply里面的success无关
 	if ok {
 		if reply.Term > rf.CurrentTerm {
