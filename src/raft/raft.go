@@ -60,6 +60,8 @@ const (
 	Follower
 )
 
+var wg sync.WaitGroup
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -228,7 +230,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//	}
 	//}
 	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm < args.Term {
-		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+		go func() { rf.waitTime <- rand.Intn(450) + 150 }()
 		rf.mu.Lock()
 		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
 		rf.VoteFor = args.CandidateId
@@ -237,7 +239,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		DPrintf("[%d] sending granted vote to %d", rf.me, args.CandidateId)
 		rf.mu.Unlock()
-		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+		//go func() { rf.waitTime <- rand.Intn(450) + 150 }()
 	} /**
 	else if rf.CurrentTerm == args.Term {
 		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
@@ -376,7 +378,7 @@ func (rf *Raft) ticker() {
 		//如果收到心跳的包，则为true，表示现在还有领导者，不进入选举，否则为false，进入选举
 		//第一次需要等待
 		//rf.wg.Wait()
-		rf.waitTime <- rand.Intn(150) + 150
+		rf.waitTime <- rand.Intn(450) + 150
 
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
 		for len(rf.waitTime) != 0 && rf.State != Leader {
@@ -400,7 +402,7 @@ func (rf *Raft) ticker() {
 				Term:        rf.CurrentTerm,
 				CandidateId: rf.me,
 			}
-			reply := &RequestVoteReply{}
+			reply := &RequestVoteReply{VoteGranted: false}
 
 			rf.mu.Unlock()
 			votes := 1
@@ -414,43 +416,15 @@ func (rf *Raft) ticker() {
 					break
 				}
 				if peerId == rf.me {
+					DPrintf("%d not send request to %d", rf.me, peerId)
 					continue
 				}
-
-				go func() {
-					//rf.wg.Add(1)
-					//defer rf.wg.Done()
-					ok := rf.sendRequestVote(peerId, args, reply)
-					if rf.State == Follower {
-						DPrintf("Candidate%d become Follower", rf.me)
-						return
-					}
-					DPrintf("rf[%d].sendRequestVote([%d], args, reply)", rf.me, peerId)
-					rf.mu.Lock()
-
-					if ok {
-						if reply.VoteGranted == true {
-							votes++
-							if Done && votes > len(rf.peers)/2 {
-								rf.State = Leader
-								DPrintf("[%d] we got enough votes, we are now leader (currentTerm=%d)", rf.me, rf.CurrentTerm)
-								Done = false
-								rf.mu.Unlock()
-								return
-							}
-							DPrintf("[%d] got vote from %d", rf.me, peerId)
-						}
-					} else {
-						DPrintf("rf[%d].sendRequestVote(%d, args, reply) failed", rf.me, peerId)
-						rf.mu.Unlock()
-						return
-					}
-
-					rf.mu.Unlock()
-				}()
+				//需要等，不然for比go携程快，经典问题
+				wg.Add(1)
+				go rf.AskForVote(peerId, &votes, &Done, args, reply)
 			}
-			//rf.wg.Wait()
-			time.Sleep(3 * time.Millisecond)
+			wg.Wait()
+			//time.Sleep(200 * time.Millisecond)
 			if Done == true {
 				//rf.mu.Lock()
 				rf.State = Follower
@@ -463,6 +437,36 @@ func (rf *Raft) ticker() {
 		}
 
 	}
+}
+func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVoteArgs, reply *RequestVoteReply) {
+	defer wg.Done()
+	ok := rf.sendRequestVote(peerId, args, reply)
+	if rf.State == Follower {
+		DPrintf("Candidate%d become Follower", rf.me)
+		return
+	}
+	DPrintf("rf[%d].sendRequestVote([%d], args, reply)", rf.me, peerId)
+	rf.mu.Lock()
+
+	if ok {
+		if reply.VoteGranted == true {
+			*votes++
+			if *Done && *votes > len(rf.peers)/2 {
+				rf.State = Leader
+				DPrintf("[%d] we got enough votes, we are now leader (currentTerm=%d)", rf.me, rf.CurrentTerm)
+				*Done = false
+				rf.mu.Unlock()
+				return
+			}
+			DPrintf("[%d] got vote from %d", rf.me, peerId)
+		}
+	} else {
+		DPrintf("rf[%d].sendRequestVote(%d, args, reply) failed", rf.me, peerId)
+		rf.mu.Unlock()
+		return
+	}
+
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) Listen() {
@@ -507,7 +511,7 @@ func (rf *Raft) Listen() {
 
 					//DPrintf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 				}()
-				time.Sleep(40 * time.Millisecond)
+				time.Sleep(20 * time.Millisecond)
 			}
 		}
 		//如果当前节点的状态是领导者或者候选者
@@ -561,7 +565,7 @@ func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
-	go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+	go func() { rf.waitTime <- rand.Intn(450) + 150 }()
 
 	if args.Term >= rf.CurrentTerm {
 		rf.mu.Lock()
