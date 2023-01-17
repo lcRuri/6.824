@@ -480,38 +480,10 @@ func (rf *Raft) Listen() {
 				if peerId == rf.me {
 					continue
 				}
-				go func() {
-					//rf.wg.Add(1)
-					//defer rf.wg.Done()
-					if rf.State != Leader {
-						return
-					}
-					args := &AppendEntries{
-						Term:     rf.CurrentTerm,
-						LeaderId: rf.me,
-					}
-					reply := &ReceiveEntries{Term: -1, Success: false}
-					//DPrintf("LeaderHeart %d to %d", rf.me, peerId)
-					ok := rf.sendHeart(peerId, args, reply)
-					//这里的ok是指发送rpc成功，与reply里面的success无关
-					if ok {
-						if reply.Term > rf.CurrentTerm {
-							rf.mu.Lock()
-							rf.CurrentTerm = reply.Term
-							if reply.Success == true {
-								rf.State = Follower
-								DPrintf("%d reconnect to net,not leader now", rf.me)
-							}
-							DPrintf("%d term is %d", rf.me, rf.CurrentTerm)
-							//go func() { rf.waitTime <- rand.Intn(200) + 200 }()
-							rf.mu.Unlock()
-
-						}
-					}
-
-					//DPrintf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
-				}()
-				time.Sleep(20 * time.Millisecond)
+				//rf.wg.Add(1)
+				go rf.Heart(peerId)
+				//rf.wg.Wait()
+				time.Sleep(10 * time.Millisecond)
 			}
 		}
 		//如果当前节点的状态是领导者或者候选者
@@ -532,6 +504,39 @@ func (rf *Raft) Listen() {
 		//}
 
 	}
+
+}
+
+func (rf *Raft) Heart(peerId int) {
+	//rf.wg.Add(1)
+	//defer rf.wg.Done()
+	if rf.State != Leader {
+		return
+	}
+	args := &AppendEntries{
+		Term:     rf.CurrentTerm,
+		LeaderId: rf.me,
+	}
+	reply := &ReceiveEntries{Term: -1, Success: false}
+	//DPrintf("LeaderHeart %d to %d", rf.me, peerId)
+	ok := rf.sendHeart(peerId, args, reply)
+	//这里的ok是指发送rpc成功，与reply里面的success无关
+	if ok {
+		if reply.Term > rf.CurrentTerm {
+			rf.mu.Lock()
+			rf.CurrentTerm = reply.Term
+			if reply.Success == true {
+				rf.State = Follower
+				DPrintf("%d reconnect to net,not leader now", rf.me)
+			}
+			DPrintf("%d term is %d", rf.me, rf.CurrentTerm)
+			//go func() { rf.waitTime <- rand.Intn(200) + 200 }()
+			rf.mu.Unlock()
+
+		}
+	}
+
+	//DPrintf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 
 }
 
