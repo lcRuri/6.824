@@ -83,6 +83,13 @@ type Raft struct {
 	waitTime    chan int
 	wg          sync.WaitGroup
 	//LeaderId    int
+
+	Logs map[int]interface{} //日志条目 每个日志条目包含对状态机的命令当日志从leader那接收到
+	//Volatile State
+	CommitIndex int //已知的索引最高的日志条目将被提交
+	LastApplied int //被应用的状态机索引最高的日志条目
+
+	applyCh chan ApplyMsg
 }
 
 type RaftState struct {
@@ -99,10 +106,6 @@ type LeadersState struct {
 //ServerState Server的状态
 type ServerState struct {
 	//Persistent state
-	Logs []string //日志条目 每个日志条目包含对状态机的命令当日志从leader那接收到
-	//Volatile State
-	CommitIndex int //已知的索引最高的日志条目将被提交
-	LastApplied int //被应用的状态机索引最高的日志条目
 
 }
 
@@ -230,7 +233,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//	}
 	//}
 	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm < args.Term {
-		go func() { rf.waitTime <- rand.Intn(450) + 150 }()
+		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 		rf.mu.Lock()
 		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
 		rf.VoteFor = args.CandidateId
@@ -339,7 +342,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	if rf.State != Leader {
+		return index, term, false
+	}
 
+	//如果是领导者
+	//将当前的任期和命令提交到logs中
+	rf.Logs[rf.CurrentTerm] = command
+	//返回命令提交后将出现的索引
+	index = len(rf.Logs)
+	term = rf.CurrentTerm
 	return index, term, isLeader
 }
 
@@ -378,7 +390,7 @@ func (rf *Raft) ticker() {
 		//如果收到心跳的包，则为true，表示现在还有领导者，不进入选举，否则为false，进入选举
 		//第一次需要等待
 		//rf.wg.Wait()
-		rf.waitTime <- rand.Intn(450) + 150
+		rf.waitTime <- rand.Intn(150) + 150
 
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
 		for len(rf.waitTime) != 0 && rf.State != Leader {
@@ -570,7 +582,7 @@ func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
-	go func() { rf.waitTime <- rand.Intn(450) + 150 }()
+	go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 
 	if args.Term >= rf.CurrentTerm {
 		rf.mu.Lock()
@@ -623,6 +635,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		waitTime:  make(chan int, 1),
 		wg:        sync.WaitGroup{},
 		//LeaderId: -1,
+		Logs:    make(map[int]interface{}, 0),
+		applyCh: applyCh,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
