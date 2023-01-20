@@ -201,16 +201,16 @@ type RequestVoteReply struct {
 }
 
 type AppendEntries struct {
-	Term         int
-	LeaderId     int
-	PreLogIndex  int
-	PreLogTerm   int
-	Entries      []string
-	LeaderCommit int
+	Term         int      //领导者的任期
+	LeaderId     int      //so follower可以重定向客户端
+	PreLogIndex  int      //紧邻新日志条目的索引
+	PreLogTerm   int      //上一页日志索引条目的任期
+	Entries      []string //要存储的日志条目(检测心跳为空;为了提高效率，可以发送多个)
+	LeaderCommit int      //领导者的提交索引
 }
 
 type ReceiveEntries struct {
-	Term    int
+	Term    int //目前的任期，为了领导者去更新自己的任期
 	Success bool
 }
 
@@ -537,11 +537,11 @@ func (rf *Raft) Heart(peerId *int) {
 		if reply.Term > rf.CurrentTerm {
 			rf.mu.Lock()
 			rf.CurrentTerm = reply.Term
-			if reply.Success == true {
-				rf.State = Follower
-				DPrintf("%d reconnect to net,not leader now", rf.me)
-			}
-			DPrintf("%d term is %d", rf.me, rf.CurrentTerm)
+
+			//rf.State = Follower
+			//DPrintf("%d reconnect to net,not leader now", rf.me)
+
+			DPrintf("leader%d term is %d", rf.me, rf.CurrentTerm)
 			//go func() { rf.waitTime <- rand.Intn(200) + 200 }()
 			rf.mu.Unlock()
 
@@ -593,16 +593,11 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		//reply.Success = true
 		DPrintf("%d receive leaderheart from %d", rf.me, args.LeaderId)
 		rf.mu.Unlock()
-	} else if args.Term < rf.CurrentTerm && rf.State == Leader { //如果leader的term小于当前的，并且需要满足当前节点还是领导者，这样leader可能出现了问题，变为foller
-		rf.mu.Lock()
-		reply.Term = rf.CurrentTerm
-		reply.Success = true
-		DPrintf("old leader need to be foller")
-		rf.mu.Unlock()
 	} else if args.Term < rf.CurrentTerm && rf.State != Leader {
 		rf.mu.Lock()
 		rf.State = Follower
-		rf.CurrentTerm = args.Term
+		//rf.CurrentTerm = args.Term
+		reply.Term = rf.CurrentTerm
 		rf.mu.Unlock()
 	}
 
