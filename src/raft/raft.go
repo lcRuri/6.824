@@ -82,6 +82,7 @@ type Raft struct {
 	updatedTime time.Time
 	waitTime    chan int
 	wg          sync.WaitGroup
+	heartbeat   bool
 	//LeaderId    int
 
 	Logs []Logs //日志条目 每个日志条目包含对状态机的命令当日志从leader那接收到
@@ -93,8 +94,8 @@ type Raft struct {
 }
 
 type Logs struct {
-	command interface{}
-	term    int
+	Command interface{}
+	Term    int
 }
 
 type RaftState struct {
@@ -238,12 +239,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//	}
 	//}
 	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm < args.Term {
-		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+		//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 		rf.mu.Lock()
 		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
 		rf.VoteFor = args.CandidateId
 		rf.CurrentTerm = rf.CurrentTerm + 1
 		rf.State = Follower
+		rf.heartbeat = true
 		reply.VoteGranted = true
 		DPrintf("[%d] sending granted vote to %d", rf.me, args.CandidateId)
 		rf.mu.Unlock()
@@ -353,7 +355,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	//如果是领导者
 	//将当前的任期和命令提交到logs中
-	rf.Logs = append(rf.Logs, Logs{command: command, term: rf.CurrentTerm})
+	rf.Logs = append(rf.Logs, Logs{Command: command, Term: rf.CurrentTerm})
 	//返回命令提交后将出现的索引
 	index = len(rf.Logs)
 	term = rf.CurrentTerm
@@ -396,15 +398,17 @@ func (rf *Raft) ticker() {
 		//第一次需要等待
 		//rf.wg.Wait()
 
-		rf.waitTime <- rand.Intn(150) + 150
-
+		//rf.waitTime <- rand.Intn(150) + 150
+		time.Sleep(time.Millisecond * time.Duration(rand.Intn(150)+150))
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
-		for len(rf.waitTime) != 0 && rf.State != Leader {
-			sleepTime, ok := <-rf.waitTime
-			if !ok {
-				DPrintf("[%d] rf.waitTime blocked", rf.me)
-			}
-			time.Sleep(time.Millisecond * time.Duration(sleepTime))
+		for /**len(rf.waitTime) != 0**/ rf.heartbeat == true && rf.State != Leader {
+			//sleepTime, ok := <-rf.waitTime
+			//if !ok {
+			//	DPrintf("[%d] rf.waitTime blocked", rf.me)
+			//}
+			//time.Sleep(time.Millisecond * time.Duration(sleepTime))
+			rf.heartbeat = false
+			time.Sleep(time.Millisecond * time.Duration(rand.Intn(150)+150))
 			//DPrintf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
 
 		}
@@ -554,7 +558,7 @@ func (rf *Raft) Heart(peerId *int, msg ApplyMsg) {
 	//只有当标记的位置不为-1，才添加需要的
 	if msg.CommandIndex != -1 {
 		args.PreLogIndex = msg.CommandIndex
-		args.Entries = append(args.Entries, Logs{command: msg.Command, term: rf.CurrentTerm})
+		args.Entries = append(args.Entries, Logs{Command: msg.Command, Term: rf.CurrentTerm})
 	}
 	reply := &ReceiveEntries{Term: -1, Success: false}
 	//DPrintf("LeaderHeart %d to %d", rf.me, peerId)
@@ -609,7 +613,7 @@ func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
-	go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+	//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 
 	if args.Term >= rf.CurrentTerm {
 		rf.mu.Lock()
@@ -617,6 +621,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		rf.State = Follower
 		//重置当前的投票选择
 		rf.VoteFor = -1
+		rf.heartbeat = true
 		//reply.Success = true
 		//DPrintf("%d receive leaderheart from %d", rf.me, args.LeaderId)
 
@@ -624,7 +629,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		//处理和日志有关的
 		if args.PreLogIndex != -1 {
 			rf.CommitIndex++
-			rf.Logs = append(rf.Logs, Logs{command: args.Entries, term: args.Term})
+			rf.Logs = append(rf.Logs, Logs{Command: args.Entries, Term: args.Term})
 			reply.Term = rf.CurrentTerm
 			reply.Success = true
 		}
@@ -664,8 +669,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		peers:     peers,
 		persister: persister,
 		me:        me,
-		waitTime:  make(chan int, 1),
+		//waitTime:  make(chan int, 1),
 		wg:        sync.WaitGroup{},
+		heartbeat: false,
 		//LeaderId: -1,
 		Logs:        make([]Logs, 0),
 		applyCh:     make(chan ApplyMsg, 1),
