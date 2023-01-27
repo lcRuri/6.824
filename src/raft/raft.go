@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"encoding/gob"
+	"fmt"
 	"math/rand"
 
 	//	"bytes"
@@ -105,23 +107,6 @@ type Raft struct {
 type LogEntry struct {
 	Command interface{}
 	Term    int
-}
-
-type RaftState struct {
-	LeadersState *LeadersState
-	ServerState  *ServerState
-}
-
-//LeadersState 选举后要重新初始化
-type LeadersState struct {
-	NextIndex  []int //下一个日志条目的索引 猜测是不是原来存leader的所有命令
-	MatchIndex []int //最高日志条目索引 初始为0 单调增
-}
-
-//ServerState Server的状态
-type ServerState struct {
-	//Persistent state
-
 }
 
 // return currentTerm and whether this server
@@ -503,9 +488,10 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 }
 
 func (rf *Raft) Listen() {
+	isApplied := 0
 	for rf.killed() == false {
 		for rf.State == Leader {
-			isApplied := 0
+
 			for peerId, _ := range rf.peers {
 
 				if rf.State != Leader {
@@ -517,24 +503,25 @@ func (rf *Raft) Listen() {
 				//rf.wg.Add(1)
 				go rf.Heart(&peerId, &isApplied)
 
-				go func() {
-					rf.mu.Lock()
-					if isApplied > len(rf.peers)/2 {
-						for i := rf.CommitIndex; i < len(rf.LogEntry); i++ {
-							msg := &ApplyMsg{
-								CommandValid: true,
-								Command:      rf.LogEntry[i].Command,
-								CommandIndex: i,
-								CommandTerm:  rf.LogEntry[i].Term,
-							}
-
-							rf.applyCh <- *msg
-							rf.CommitIndex += 1
-							rf.LastApplied += 1
+				if isApplied > len(rf.peers)/2 {
+					for i := rf.CommitIndex; i < len(rf.LogEntry); i++ {
+						msg := &ApplyMsg{
+							CommandValid: true,
+							Command:      rf.LogEntry[i].Command,
+							CommandIndex: i,
+							CommandTerm:  rf.LogEntry[i].Term,
 						}
+
+						rf.applyCh <- *msg
+						rf.CommitIndex += 1
+						rf.LastApplied += 1
+						DPrintf("leader%d commit log", rf.me)
+						DPrintf("rf.CommitIndex:%d,rf.LastApplied:%d", rf.CommitIndex, rf.LastApplied)
+						fmt.Println(rf.LogEntry)
+						isApplied = 0
 					}
-					rf.mu.Unlock()
-				}()
+				}
+
 				//rf.wg.Wait()
 				time.Sleep(10 * time.Millisecond)
 			}
@@ -552,17 +539,19 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 	}
 
 	args := &AppendEntries{
-		Term:        rf.CurrentTerm,
-		LeaderId:    rf.me,
-		PreLogIndex: -2,
+		Term:         rf.CurrentTerm,
+		LeaderId:     rf.me,
+		PreLogIndex:  -2,
+		LeaderCommit: rf.CommitIndex,
 	}
 
 	//如果leader里面的LogEntry数量大于leader已经提交的数量
 	//说明有日志还没有复制给follower
+	//DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
 	if len(rf.LogEntry) > rf.CommitIndex {
 		//可能存在多条
 		for i := rf.CommitIndex; i < len(rf.LogEntry); i++ {
-			args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i], Term: rf.LogEntry[i].Term})
+			args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
 		}
 		args.PreLogIndex = rf.CommitIndex - 1
 		//最新的新日志为第0个，那么之前日志就不存在
@@ -621,7 +610,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		rf.State = Follower
 		//重置当前的投票选择
 		rf.VoteFor = -1
-		//DPrintf("%d receive leaderheart from %d", rf.me, args.LeaderId)
+		//DPrintf("%d receive leaderheart from %d,self_CommitIndex%d,LeaderCommit%d,len(args.Entries):%d", rf.me, args.LeaderId, rf.CommitIndex, args.LeaderCommit, len(args.Entries))
 		reply.Term = rf.CurrentTerm
 
 		//2B
@@ -641,6 +630,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
 				//产生冲突，删除这个存在的条目已经之后的
 				if log.Term != args.PreLogTerm {
+					DPrintf("delete pre log")
 					rf.LogEntry = rf.LogEntry[:args.PreLogIndex]
 				}
 
@@ -648,33 +638,32 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
 			//每次取出一条日志，放到自己的里面去
 			for i := 0; i < len(args.Entries); i++ {
-				rf.LogEntry = append(rf.LogEntry, LogEntry{Command: args.Entries[i], Term: args.Entries[i].Term})
+				rf.LogEntry = append(rf.LogEntry, LogEntry{Command: args.Entries[i].Command, Term: args.Entries[i].Term})
+				fmt.Println(rf.LogEntry)
 			}
 
 			reply.Success = true
 			DPrintf("%d receive from %d,dealing log success", rf.me, args.LeaderId)
 
-			if rf.CommitIndex < args.LeaderCommit {
-				go func() {
-					rf.mu.Lock()
-					for i := min(rf.CommitIndex, rf.LastApplied); i < args.LeaderCommit; i++ {
-						msg := &ApplyMsg{
-							CommandValid: true,
-							Command:      rf.LogEntry[i].Command,
-							CommandIndex: i,
-							CommandTerm:  rf.LogEntry[i].Term,
-						}
-
-						rf.applyCh <- *msg
-						rf.LastApplied += 1
-					}
-					rf.mu.Unlock()
-				}()
-				rf.CommitIndex = args.LeaderCommit
-				DPrintf("follower commit log")
-			}
 		}
 
+		if rf.CommitIndex < args.LeaderCommit {
+			for i := rf.CommitIndex; i < args.LeaderCommit; i++ {
+				msg := &ApplyMsg{
+					CommandValid: true,
+					Command:      rf.LogEntry[i].Command,
+					CommandIndex: i,
+					CommandTerm:  rf.LogEntry[i].Term,
+				}
+
+				rf.applyCh <- *msg
+				fmt.Println(rf.LogEntry)
+				rf.CommitIndex += 1
+				rf.LastApplied += 1
+			}
+			//rf.CommitIndex = args.LeaderCommit
+			DPrintf("follower%d commit log", rf.me)
+		}
 		rf.mu.Unlock()
 	} else if args.Term < rf.CurrentTerm && rf.State != Leader {
 		rf.mu.Lock()
@@ -728,7 +717,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// initialize from state persisted before a crash
 	//在崩溃前持续从状态初始化
 	rf.readPersist(persister.ReadRaftState())
-
+	gob.Register(LogEntry{})
 	// start ticker goroutine to start elections
 	//启动自动Goroutine以开始选举
 	//进行领导在选举
