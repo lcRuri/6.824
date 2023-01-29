@@ -356,6 +356,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	//通过这个将命令写入领导者里面
 	//leader日志数组里面的实际的索引比认为的小1(因为是从0开始)
 	rf.LogEntry = append(rf.LogEntry, LogEntry{Command: command, Term: rf.CurrentTerm})
+	fmt.Printf("leader%d receive cmd%v\n", rf.me, command)
 	//返回命令提交后将出现的索引
 	index = len(rf.LogEntry)
 	term = rf.CurrentTerm
@@ -404,12 +405,12 @@ func (rf *Raft) ticker() {
 		rf.lastActiveTime = time.Now()
 
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
-		for time.Now().Sub(rf.lastActiveTime) <= 600*time.Millisecond && rf.State != Leader {
+		for time.Now().Sub(rf.lastActiveTime) <= 300*time.Millisecond && rf.State != Leader {
 			//time.Sleep(time.Millisecond * time.Duration(sleepTime))
 			//DPrintf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
 		}
 
-		if rf.State != Leader && time.Now().Sub(rf.lastActiveTime) > 600*time.Millisecond {
+		if rf.State != Leader && time.Now().Sub(rf.lastActiveTime) > 300*time.Millisecond {
 			rf.mu.Lock()
 			//更改自己的身份
 			rf.State = Candidate
@@ -550,7 +551,7 @@ func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
 				appliedArr = append(appliedArr, ApplyMsg{
 					CommandValid: true,
 					Command:      rf.LogEntry[rf.LastApplied].Command,
-					CommandIndex: rf.LastApplied,
+					CommandIndex: (rf.LastApplied + 1),
 				})
 
 				DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied].Command, rf.LastApplied)
@@ -581,7 +582,7 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 
 	//如果leader里面的LogEntry数量大于leader已经提交的数量
 	//说明有日志还没有复制给follower
-	//DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
+	DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
 	if len(rf.LogEntry) > rf.CommitIndex {
 		//可能存在多条
 		for i := rf.CommitIndex; i < len(rf.LogEntry); i++ {
@@ -593,8 +594,8 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 			args.PreLogTerm = 0
 			args.PreCommand = nil
 		} else {
-			args.PreLogTerm = rf.LogEntry[len(rf.LogEntry)-1].Term
-			args.PreCommand = rf.LogEntry[len(rf.LogEntry)-1]
+			args.PreLogTerm = rf.LogEntry[len(rf.LogEntry)-2].Term
+			args.PreCommand = rf.LogEntry[len(rf.LogEntry)-2]
 		}
 		args.LeaderCommit = rf.CommitIndex
 	}
