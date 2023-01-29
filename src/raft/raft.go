@@ -48,7 +48,7 @@ type ApplyMsg struct {
 	CommandValid bool        //命令是否有效
 	Command      interface{} //命令本身
 	CommandIndex int         //命令的索引
-	CommandTerm  int
+
 	// For 2D:
 	SnapshotValid bool
 	Snapshot      []byte
@@ -85,12 +85,12 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	//图2描述了Raft服务器必须维护的状态。
-	State       int //当前节点的身份
-	CurrentTerm int //server能看到的最新任期
-	VoteFor     int //候选者Id(在当前任期里面收到的投票，没有为null)
-	waitTime    chan int
-	wg          sync.WaitGroup
-	heartbeat   bool
+	State          int //当前节点的身份
+	CurrentTerm    int //server能看到的最新任期
+	VoteFor        int //候选者Id(在当前任期里面收到的投票，没有为null)
+	lastActiveTime time.Time
+	wg             sync.WaitGroup
+	heartbeat      bool
 	//LeaderId    int
 
 	LogEntry []LogEntry //日志条目 每个日志条目包含对状态机的命令当日志从leader那接收到
@@ -235,8 +235,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//	}
 	//}
 	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm < args.Term {
-		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+		//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 		rf.mu.Lock()
+		rf.lastActiveTime = time.Now()
 		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
 		rf.VoteFor = args.CandidateId
 		rf.CurrentTerm = rf.CurrentTerm + 1
@@ -339,6 +340,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	index := -1
 	term := -1
 	isLeader := true
@@ -395,20 +398,18 @@ func (rf *Raft) ticker() {
 		//第一次需要等待
 		//rf.wg.Wait()
 
-		rf.waitTime <- rand.Intn(150) + 150
+		//rf.waitTime <- rand.Intn(150) + 150
+		sleepTime := rand.Intn(450)
+		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
+		rf.lastActiveTime = time.Now()
 
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
-		for len(rf.waitTime) != 0 && rf.State != Leader {
-			sleepTime, ok := <-rf.waitTime
-			if !ok {
-				DPrintf("[%d] rf.waitTime blocked", rf.me)
-			}
-			time.Sleep(time.Millisecond * time.Duration(sleepTime))
+		for time.Now().Sub(rf.lastActiveTime) <= 600*time.Millisecond && rf.State != Leader {
+			//time.Sleep(time.Millisecond * time.Duration(sleepTime))
 			//DPrintf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
-
 		}
 
-		if rf.State != Leader && len(rf.waitTime) == 0 {
+		if rf.State != Leader && time.Now().Sub(rf.lastActiveTime) > 600*time.Millisecond {
 			rf.mu.Lock()
 			//更改自己的身份
 			rf.State = Candidate
@@ -488,10 +489,12 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 }
 
 func (rf *Raft) Listen() {
-	isApplied := 0
-	for rf.killed() == false {
-		for rf.State == Leader {
 
+	for rf.killed() == false {
+		isApplied := 0
+		//初始化nextInt和matchInt数组
+
+		for rf.State == Leader {
 			for peerId, _ := range rf.peers {
 
 				if rf.State != Leader {
@@ -500,35 +503,66 @@ func (rf *Raft) Listen() {
 				if peerId == rf.me {
 					continue
 				}
-				//rf.wg.Add(1)
-				go rf.Heart(&peerId, &isApplied)
+
+				rf.Heart(&peerId, &isApplied)
 
 				if isApplied > len(rf.peers)/2 {
-					for i := rf.CommitIndex; i < len(rf.LogEntry); i++ {
-						msg := &ApplyMsg{
-							CommandValid: true,
-							Command:      rf.LogEntry[i].Command,
-							CommandIndex: i,
-							CommandTerm:  rf.LogEntry[i].Term,
-						}
-
-						rf.applyCh <- *msg
-						rf.CommitIndex += 1
-						rf.LastApplied += 1
-						DPrintf("leader%d commit log", rf.me)
-						DPrintf("rf.CommitIndex:%d,rf.LastApplied:%d", rf.CommitIndex, rf.LastApplied)
-						fmt.Println(rf.LogEntry)
-						isApplied = 0
-					}
+					rf.mu.Lock()
+					rf.CommitIndex += 1
+					isApplied = 0
+					rf.mu.Unlock()
+					//for i := rf.CommitIndex; i < len(rf.LogEntry); i++ {
+					//	msg := &ApplyMsg{
+					//		CommandValid: true,
+					//		Command:      rf.LogEntry[i].Command,
+					//		CommandIndex: i,
+					//	}
+					//
+					//	rf.applyCh <- *msg
+					//	rf.CommitIndex += 1
+					//	rf.LastApplied += 1
+					//	DPrintf("leader%d commit log", rf.me)
+					//	DPrintf("rf.CommitIndex:%d,rf.LastApplied:%d", rf.CommitIndex, rf.LastApplied)
+					//	fmt.Println("leader", rf.me, rf.LogEntry)
+					//	fmt.Println("leader apply chan len", len(rf.applyCh))
+					//	isApplied = 0
+					//}
 				}
 
 				//rf.wg.Wait()
-				time.Sleep(10 * time.Millisecond)
+				//time.Sleep(10 * time.Millisecond)
 			}
 		}
 
 	}
 
+}
+
+func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
+	for rf.killed() == false {
+		time.Sleep(10 * time.Millisecond)
+		appliedArr := make([]ApplyMsg, 0)
+		func() {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+
+			for rf.CommitIndex > rf.LastApplied {
+				appliedArr = append(appliedArr, ApplyMsg{
+					CommandValid: true,
+					Command:      rf.LogEntry[rf.LastApplied].Command,
+					CommandIndex: rf.LastApplied,
+				})
+
+				DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied].Command, rf.LastApplied)
+				rf.LastApplied += 1
+				fmt.Println(rf.CommitIndex, rf.LastApplied)
+			}
+		}()
+
+		for _, msg := range appliedArr {
+			applyCh <- msg
+		}
+	}
 }
 
 func (rf *Raft) Heart(peerId *int, isApplied *int) {
@@ -602,10 +636,11 @@ func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
-	go func() { rf.waitTime <- rand.Intn(150) + 150 }()
+	//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 
 	if args.Term >= rf.CurrentTerm {
 		rf.mu.Lock()
+		rf.lastActiveTime = time.Now()
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
 		//重置当前的投票选择
@@ -639,35 +674,36 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 			//每次取出一条日志，放到自己的里面去
 			for i := 0; i < len(args.Entries); i++ {
 				rf.LogEntry = append(rf.LogEntry, LogEntry{Command: args.Entries[i].Command, Term: args.Entries[i].Term})
-				fmt.Println(rf.LogEntry)
+				fmt.Println("follower", rf.me, rf.LogEntry)
 			}
 
 			reply.Success = true
 			DPrintf("%d receive from %d,dealing log success", rf.me, args.LeaderId)
+			//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 
 		}
 
 		if rf.CommitIndex < args.LeaderCommit {
-			for i := rf.CommitIndex; i < args.LeaderCommit; i++ {
-				msg := &ApplyMsg{
-					CommandValid: true,
-					Command:      rf.LogEntry[i].Command,
-					CommandIndex: i,
-					CommandTerm:  rf.LogEntry[i].Term,
-				}
-
-				rf.applyCh <- *msg
-				fmt.Println(rf.LogEntry)
-				rf.CommitIndex += 1
-				rf.LastApplied += 1
-			}
-			//rf.CommitIndex = args.LeaderCommit
-			DPrintf("follower%d commit log", rf.me)
+			rf.CommitIndex = args.LeaderCommit
+			//for i := rf.CommitIndex; i < args.LeaderCommit; i++ {
+			//	msg := &ApplyMsg{
+			//		CommandValid: true,
+			//		Command:      rf.LogEntry[i].Command,
+			//		CommandIndex: i,
+			//	}
+			//
+			//	rf.applyCh <- *msg
+			//	fmt.Println("follower applyCh len", len(rf.applyCh))
+			//	rf.CommitIndex += 1
+			//}
+			////rf.CommitIndex = args.LeaderCommit
+			//DPrintf("follower%d commit log", rf.me)
 		}
 		rf.mu.Unlock()
 	} else if args.Term < rf.CurrentTerm && rf.State != Leader {
 		rf.mu.Lock()
 		rf.State = Follower
+		rf.lastActiveTime = time.Now()
 		//rf.CurrentTerm = args.Term
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
@@ -700,20 +736,19 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		peers:       peers,
 		persister:   persister,
 		me:          me,
-		waitTime:    make(chan int, 1),
 		wg:          sync.WaitGroup{},
 		LogEntry:    make([]LogEntry, 0),
 		CommitIndex: 0,
 		LastApplied: 0,
 		nextIndex:   make([]int, len(peers)),
 		matchIndex:  make([]int, len(peers)),
-		applyCh:     applyCh,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.State = Follower
 	rf.CurrentTerm = 0
 	rf.VoteFor = -1
+	rf.lastActiveTime = time.Now()
 	// initialize from state persisted before a crash
 	//在崩溃前持续从状态初始化
 	rf.readPersist(persister.ReadRaftState())
@@ -724,6 +759,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	go rf.ticker()
 	//监测是否收到心跳
 	go rf.Listen()
+
+	go rf.applyToService(applyCh)
 	DPrintf("%d init", rf.me)
 	return rf
 }
