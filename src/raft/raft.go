@@ -493,7 +493,7 @@ func (rf *Raft) Listen() {
 
 	for rf.killed() == false {
 		isApplied := 0
-		//初始化nextInt和matchInt数组
+		//修改nextInt和matchInt数组
 
 		for rf.State == Leader {
 			for peerId, _ := range rf.peers {
@@ -512,22 +512,6 @@ func (rf *Raft) Listen() {
 					rf.CommitIndex += 1
 					isApplied = 0
 					rf.mu.Unlock()
-					//for i := rf.CommitIndex; i < len(rf.LogEntry); i++ {
-					//	msg := &ApplyMsg{
-					//		CommandValid: true,
-					//		Command:      rf.LogEntry[i].Command,
-					//		CommandIndex: i,
-					//	}
-					//
-					//	rf.applyCh <- *msg
-					//	rf.CommitIndex += 1
-					//	rf.LastApplied += 1
-					//	DPrintf("leader%d commit log", rf.me)
-					//	DPrintf("rf.CommitIndex:%d,rf.LastApplied:%d", rf.CommitIndex, rf.LastApplied)
-					//	fmt.Println("leader", rf.me, rf.LogEntry)
-					//	fmt.Println("leader apply chan len", len(rf.applyCh))
-					//	isApplied = 0
-					//}
 				}
 
 				//rf.wg.Wait()
@@ -546,7 +530,7 @@ func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
 		func() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
-
+			DPrintf("[%d] try to commit log,len(rf.LogEntry):%d,commitIndex:%d,lastApplied:%d", rf.me, len(rf.LogEntry), rf.CommitIndex, rf.LastApplied)
 			for rf.CommitIndex > rf.LastApplied {
 				appliedArr = append(appliedArr, ApplyMsg{
 					CommandValid: true,
@@ -582,20 +566,23 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 
 	//如果leader里面的LogEntry数量大于leader已经提交的数量
 	//说明有日志还没有复制给follower
-	DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
+	//DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
 	if len(rf.LogEntry) > rf.CommitIndex {
 		//可能存在多条
+		//todo
 		for i := rf.CommitIndex; i < len(rf.LogEntry); i++ {
 			args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
 		}
-		args.PreLogIndex = rf.CommitIndex - 1
+		//args.PreLogIndex = rf.CommitIndex - 1
+		args.PreLogIndex = rf.nextIndex[*peerId] - 1
+		fmt.Printf("[%d] compare prelogindex:%d,commitindex:%d,rf.nextint[*peerid]:%d\n", *peerId, args.PreLogIndex, rf.CommitIndex, rf.nextIndex[*peerId])
 		//最新的新日志为第0个，那么之前日志就不存在
-		if rf.CommitIndex-1 < 0 {
-			args.PreLogTerm = 0
-			args.PreCommand = nil
-		} else {
-			args.PreLogTerm = rf.LogEntry[len(rf.LogEntry)-2].Term
-			args.PreCommand = rf.LogEntry[len(rf.LogEntry)-2]
+		if args.PreLogIndex >= 0 {
+			args.PreLogTerm = rf.LogEntry[args.PreLogIndex].Term
+			args.PreCommand = rf.LogEntry[args.PreLogIndex].Command
+			//for i := rf.matchIndex[*peerId]+1; i < len(rf.LogEntry); i++ {
+			//	args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
+			//}
 		}
 		args.LeaderCommit = rf.CommitIndex
 	}
@@ -619,6 +606,13 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 		if reply.Success == true {
 			*isApplied += 1
 			DPrintf("isApplied:%d", *isApplied)
+			rf.nextIndex[*peerId] += len(args.Entries)
+			rf.matchIndex[*peerId] = rf.nextIndex[*peerId] - 1
+		} else {
+			rf.nextIndex[*peerId] -= 1
+			if rf.nextIndex[*peerId] < 0 {
+				rf.nextIndex[*peerId] = 0
+			}
 		}
 	}
 
@@ -658,7 +652,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 			} else {
 				log := rf.LogEntry[args.PreLogIndex]
 				//能否找到一样的
-				if log != args.PreCommand || log.Term != args.PreLogTerm {
+				if log.Command != args.PreCommand || log.Term != args.PreLogTerm {
 					reply.Success = false
 					rf.mu.Unlock()
 					return
@@ -686,19 +680,6 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
 		if rf.CommitIndex < args.LeaderCommit {
 			rf.CommitIndex = args.LeaderCommit
-			//for i := rf.CommitIndex; i < args.LeaderCommit; i++ {
-			//	msg := &ApplyMsg{
-			//		CommandValid: true,
-			//		Command:      rf.LogEntry[i].Command,
-			//		CommandIndex: i,
-			//	}
-			//
-			//	rf.applyCh <- *msg
-			//	fmt.Println("follower applyCh len", len(rf.applyCh))
-			//	rf.CommitIndex += 1
-			//}
-			////rf.CommitIndex = args.LeaderCommit
-			//DPrintf("follower%d commit log", rf.me)
 		}
 		rf.mu.Unlock()
 	} else if args.Term < rf.CurrentTerm && rf.State != Leader {
