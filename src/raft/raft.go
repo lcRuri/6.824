@@ -569,8 +569,8 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 	//DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
 	if len(rf.LogEntry) > rf.CommitIndex {
 		//可能存在多条
-		//todo
-		for i := rf.CommitIndex; i < len(rf.LogEntry); i++ {
+
+		for i := rf.nextIndex[*peerId]; i < len(rf.LogEntry); i++ {
 			args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
 		}
 		//args.PreLogIndex = rf.CommitIndex - 1
@@ -609,9 +609,13 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 			rf.nextIndex[*peerId] += len(args.Entries)
 			rf.matchIndex[*peerId] = rf.nextIndex[*peerId] - 1
 		} else {
-			rf.nextIndex[*peerId] -= 1
-			if rf.nextIndex[*peerId] < 0 {
-				rf.nextIndex[*peerId] = 0
+			//只有当响应的是日志的并且失败了
+			if args.PreLogIndex != -2 {
+				rf.nextIndex[*peerId] -= 1
+				DPrintf("nextInt--")
+				if rf.nextIndex[*peerId] < 0 {
+					rf.nextIndex[*peerId] = 0
+				}
 			}
 		}
 	}
@@ -654,6 +658,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 				//能否找到一样的
 				if log.Command != args.PreCommand || log.Term != args.PreLogTerm {
 					reply.Success = false
+					DPrintf("not find same command")
 					rf.mu.Unlock()
 					return
 				}
