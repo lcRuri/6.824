@@ -21,7 +21,6 @@ import (
 	"encoding/gob"
 	"fmt"
 	"math/rand"
-
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -229,12 +228,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	//if rf.State == Candidate {
-	//	if args.CandidateId < rf.me {
-	//		rf.State = Follower
-	//	}
-	//}
-	if /**rf.VoteFor == -1 &&**/ rf.CurrentTerm < args.Term {
+	if args.Term < rf.CurrentTerm {
+		return
+	}
+	if rf.CurrentTerm < args.Term {
 		//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 		rf.mu.Lock()
 		rf.lastActiveTime = time.Now()
@@ -246,22 +243,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//DPrintf("[%d] sending granted vote to %d", rf.me, args.CandidateId)
 		rf.mu.Unlock()
 		//go func() { rf.waitTime <- rand.Intn(450) + 150 }()
-	} /**
-	else if rf.CurrentTerm == args.Term {
-		go func() { rf.waitTime <- rand.Intn(150) + 150 }()
-		rf.mu.Lock()
-		//要么已经投过票，要么就是也变成候选者
-		if rf.State == Candidate && rf.me > args.CandidateId {
-			rf.VoteFor = args.CandidateId
-			reply.VoteGranted = true
-			rf.State = Follower
-			DPrintf("%d and %d Candidate at same time,but %d send to %d,become%d", rf.me, args.CandidateId, rf.me, args.CandidateId, rf.State)
-		} else {
-			reply.VoteGranted = false
-		}
-		rf.mu.Unlock()
 	}
-	**/
 
 	return
 }
@@ -418,8 +400,9 @@ func (rf *Raft) ticker() {
 			rf.VoteFor = rf.me
 			rf.CurrentTerm = rf.CurrentTerm + 1
 			args := &RequestVoteArgs{
-				Term:        rf.CurrentTerm,
-				CandidateId: rf.me,
+				Term:         rf.CurrentTerm,
+				CandidateId:  rf.me,
+				LastLogIndex: len(rf.LogEntry),
 			}
 			reply := &RequestVoteReply{VoteGranted: false}
 
@@ -494,8 +477,9 @@ func (rf *Raft) Listen() {
 	for rf.killed() == false {
 		isApplied := 0
 		//修改nextInt和matchInt数组
-
+		i := 0
 		for rf.State == Leader {
+			//fmt.Println(i)
 			for peerId, _ := range rf.peers {
 
 				if rf.State != Leader {
@@ -514,75 +498,42 @@ func (rf *Raft) Listen() {
 					rf.mu.Unlock()
 				}
 
-				//rf.wg.Wait()
-				//time.Sleep(10 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			}
+			i++
 		}
 
 	}
 
-}
-
-func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
-	for rf.killed() == false {
-		time.Sleep(10 * time.Millisecond)
-		appliedArr := make([]ApplyMsg, 0)
-		func() {
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			DPrintf("[%d] try to commit log,len(rf.LogEntry):%d,commitIndex:%d,lastApplied:%d", rf.me, len(rf.LogEntry), rf.CommitIndex, rf.LastApplied)
-			for rf.CommitIndex > rf.LastApplied {
-				appliedArr = append(appliedArr, ApplyMsg{
-					CommandValid: true,
-					Command:      rf.LogEntry[rf.LastApplied].Command,
-					CommandIndex: (rf.LastApplied + 1),
-				})
-
-				DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied].Command, rf.LastApplied)
-				rf.LastApplied += 1
-				fmt.Println(rf.CommitIndex, rf.LastApplied)
-			}
-		}()
-
-		for _, msg := range appliedArr {
-			applyCh <- msg
-		}
-	}
 }
 
 func (rf *Raft) Heart(peerId *int, isApplied *int) {
-	//rf.wg.Add(1)
-	//defer rf.wg.Done()
-	if rf.State != Leader {
-		return
-	}
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	args := &AppendEntries{
 		Term:         rf.CurrentTerm,
 		LeaderId:     rf.me,
 		PreLogIndex:  -2,
 		LeaderCommit: rf.CommitIndex,
+		Entries:      make([]LogEntry, 0),
 	}
 
 	//如果leader里面的LogEntry数量大于leader已经提交的数量
 	//说明有日志还没有复制给follower
 	//DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
-	if len(rf.LogEntry) > rf.CommitIndex {
+	if len(rf.LogEntry) > rf.nextIndex[*peerId] {
 		//可能存在多条
-
 		for i := rf.nextIndex[*peerId]; i < len(rf.LogEntry); i++ {
 			args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
 		}
-		//args.PreLogIndex = rf.CommitIndex - 1
+
 		args.PreLogIndex = rf.nextIndex[*peerId] - 1
-		fmt.Printf("[%d] compare prelogindex:%d,commitindex:%d,rf.nextint[*peerid]:%d\n", *peerId, args.PreLogIndex, rf.CommitIndex, rf.nextIndex[*peerId])
+		//fmt.Printf("[%d] compare prelogindex:%d,commitindex:%d,rf.nextint[*peerid]:%d\n", *peerId, args.PreLogIndex, rf.CommitIndex, rf.nextIndex[*peerId])
 		//最新的新日志为第0个，那么之前日志就不存在
 		if args.PreLogIndex >= 0 {
 			args.PreLogTerm = rf.LogEntry[args.PreLogIndex].Term
 			args.PreCommand = rf.LogEntry[args.PreLogIndex].Command
-			//for i := rf.matchIndex[*peerId]+1; i < len(rf.LogEntry); i++ {
-			//	args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
-			//}
 		}
 		args.LeaderCommit = rf.CommitIndex
 	}
@@ -593,21 +544,33 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 	//这里的ok是指发送rpc成功，与reply里面的success无关
 	if ok {
 		if reply.Term > rf.CurrentTerm {
-			rf.mu.Lock()
 			rf.CurrentTerm = reply.Term
 			//rf.State = Follower
 			//DPrintf("%d reconnect to net,not leader now", rf.me)
-
 			DPrintf("leader%d term is %d", rf.me, rf.CurrentTerm)
 			//go func() { rf.waitTime <- rand.Intn(200) + 200 }()
-			rf.mu.Unlock()
-
 		}
 		if reply.Success == true {
 			*isApplied += 1
-			DPrintf("isApplied:%d", *isApplied)
 			rf.nextIndex[*peerId] += len(args.Entries)
 			rf.matchIndex[*peerId] = rf.nextIndex[*peerId] - 1
+			DPrintf("rf.nextIndex[*peerId]:%d,rf.matchIndex[*peerId]:%d", rf.nextIndex[*peerId], rf.matchIndex[*peerId])
+
+			//更新commitIndex,
+			//sortArr := make([]int, 0)
+			//for i := 0; i < len(rf.peers); i++ {
+			//	if i == rf.me {
+			//		continue
+			//	}
+			//
+			//	sortArr = append(sortArr, rf.matchIndex[i])
+			//}
+			//
+			//sort.Ints(sortArr)
+			//newCommitIndex := sortArr[len(rf.peers)/2]
+			//if newCommitIndex > rf.CommitIndex && rf.LogEntry[newCommitIndex-1].Term == rf.CurrentTerm {
+			//	rf.CommitIndex = newCommitIndex
+			//}
 		} else {
 			//只有当响应的是日志的并且失败了
 			if args.PreLogIndex != -2 {
@@ -620,6 +583,7 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 		}
 	}
 
+	//DPrintf("%d one heart,rf.nextInt:%d", *peerId, rf.nextIndex[*peerId])
 	//DPrintf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 
 }
@@ -650,10 +614,12 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		//2B
 		//处理和日志有关的
 		if args.PreLogIndex != -2 {
+
 			//第一次接受日志
 			if args.PreLogIndex == -1 {
 
 			} else {
+
 				log := rf.LogEntry[args.PreLogIndex]
 				//能否找到一样的
 				if log.Command != args.PreCommand || log.Term != args.PreLogTerm {
@@ -685,6 +651,9 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
 		if rf.CommitIndex < args.LeaderCommit {
 			rf.CommitIndex = args.LeaderCommit
+			if len(rf.LogEntry) < rf.CommitIndex {
+				rf.CommitIndex = len(rf.LogEntry)
+			}
 		}
 		rf.mu.Unlock()
 	} else if args.Term < rf.CurrentTerm && rf.State != Leader {
@@ -699,6 +668,34 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
 	//DPrintf("[%d] receive from leader:%d", rf.me, args.CandidateId)
 	return
+}
+
+func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
+	for rf.killed() == false {
+		time.Sleep(10 * time.Millisecond)
+		appliedArr := make([]ApplyMsg, 0)
+		func() {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			//DPrintf("[%d] try to commit log,len(rf.LogEntry):%d,commitIndex:%d,lastApplied:%d", rf.me, len(rf.LogEntry), rf.CommitIndex, rf.LastApplied)
+			for rf.CommitIndex > rf.LastApplied {
+				appliedArr = append(appliedArr, ApplyMsg{
+					CommandValid: true,
+					Command:      rf.LogEntry[rf.LastApplied].Command,
+					CommandIndex: (rf.LastApplied + 1),
+				})
+
+				DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied].Command, rf.LastApplied)
+				rf.LastApplied += 1
+				//fmt.Println(rf.CommitIndex, rf.LastApplied)
+			}
+		}()
+
+		for _, msg := range appliedArr {
+			applyCh <- msg
+			DPrintf("%d commit success", rf.me)
+		}
+	}
 }
 
 //
