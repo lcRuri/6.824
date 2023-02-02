@@ -21,6 +21,8 @@ import (
 	"encoding/gob"
 	"fmt"
 	"math/rand"
+	"sort"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -475,7 +477,7 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 func (rf *Raft) Listen() {
 
 	for rf.killed() == false {
-		isApplied := 0
+		//isApplied := 0
 		//修改nextInt和matchInt数组
 
 		for rf.State == Leader {
@@ -489,14 +491,14 @@ func (rf *Raft) Listen() {
 					continue
 				}
 
-				rf.Heart(&peerId, &isApplied)
+				rf.Heart(&peerId)
 
-				if isApplied > len(rf.peers)/2 {
-					rf.mu.Lock()
-					rf.CommitIndex += 1
-					isApplied = 0
-					rf.mu.Unlock()
-				}
+				//if isApplied > len(rf.peers)/2 {
+				//	rf.mu.Lock()
+				//	rf.CommitIndex += 1
+				//	isApplied = 0
+				//	rf.mu.Unlock()
+				//}
 
 				time.Sleep(10 * time.Millisecond)
 			}
@@ -507,7 +509,7 @@ func (rf *Raft) Listen() {
 
 }
 
-func (rf *Raft) Heart(peerId *int, isApplied *int) {
+func (rf *Raft) Heart(peerId *int) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -523,7 +525,6 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 	//说明有日志还没有复制给follower
 	//DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
 	if len(rf.LogEntry) > rf.nextIndex[*peerId] {
-		fmt.Printf("oneCommand\n")
 		//可能存在多条
 		for i := rf.nextIndex[*peerId]; i < len(rf.LogEntry); i++ {
 			args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
@@ -552,26 +553,29 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 			//go func() { rf.waitTime <- rand.Intn(200) + 200 }()
 		}
 		if reply.Success == true {
-			*isApplied += 1
+			//*isApplied += 1
 			rf.nextIndex[*peerId] += len(args.Entries)
 			rf.matchIndex[*peerId] = rf.nextIndex[*peerId] - 1
 			DPrintf("rf.nextIndex[*peerId]:%d,rf.matchIndex[*peerId]:%d", rf.nextIndex[*peerId], rf.matchIndex[*peerId])
 
 			//更新commitIndex,
-			//sortArr := make([]int, 0)
-			//for i := 0; i < len(rf.peers); i++ {
-			//	if i == rf.me {
-			//		continue
-			//	}
-			//
-			//	sortArr = append(sortArr, rf.matchIndex[i])
-			//}
-			//
-			//sort.Ints(sortArr)
-			//newCommitIndex := sortArr[len(rf.peers)/2]
-			//if newCommitIndex > rf.CommitIndex && rf.LogEntry[newCommitIndex-1].Term == rf.CurrentTerm {
-			//	rf.CommitIndex = newCommitIndex
-			//}
+			sortArr := make([]int, 0)
+			for i := 0; i < len(rf.peers); i++ {
+				if i == rf.me {
+					continue
+				}
+
+				sortArr = append(sortArr, rf.nextIndex[i])
+			}
+
+			sort.Ints(sortArr)
+			newCommitIndex := sortArr[len(rf.peers)/2]
+			if newCommitIndex > rf.CommitIndex && rf.LogEntry[newCommitIndex-1].Term == rf.CurrentTerm {
+				rf.CommitIndex = newCommitIndex
+				DPrintf("CommitIndex Updated")
+			}
+
+			fmt.Println(sortArr)
 		} else {
 			//只有当响应的是日志的并且失败了
 			if args.PreLogIndex != -2 {
