@@ -224,6 +224,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	//某个节点请求投票，需要分发到这个网络里面的所有节点
 	//网络中的节点调用了这个方法，希望得到投票
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if rf.State == Leader {
 		DPrintf("leader%d do not vote to %d", rf.me, args.CandidateId)
 		return
@@ -234,16 +237,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	if rf.CurrentTerm < args.Term {
 		//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
-		rf.mu.Lock()
-		rf.lastActiveTime = time.Now()
-		//如果接收节点在这个任期内还没有投票，那么它将投票给候选人
-		rf.VoteFor = args.CandidateId
-		rf.CurrentTerm = rf.CurrentTerm + 1
+		rf.CurrentTerm = args.Term
 		rf.State = Follower
-		reply.VoteGranted = true
+		rf.VoteFor = -1
 		//DPrintf("[%d] sending granted vote to %d", rf.me, args.CandidateId)
-		rf.mu.Unlock()
 		//go func() { rf.waitTime <- rand.Intn(450) + 150 }()
+	}
+
+	if rf.VoteFor == -1 || rf.VoteFor == args.CandidateId {
+		lastLogTerm := 0
+		if len(rf.LogEntry) != 0 {
+			lastLogTerm = rf.LogEntry[len(rf.LogEntry)-1].Term
+		}
+		if args.Term < lastLogTerm || args.LastLogIndex < len(rf.LogEntry) {
+			return
+		}
+		rf.VoteFor = args.CandidateId
+		reply.VoteGranted = true
+		rf.lastActiveTime = time.Now()
 	}
 
 	return
@@ -390,6 +401,7 @@ func (rf *Raft) ticker() {
 
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
 		for time.Now().Sub(rf.lastActiveTime) <= 300*time.Millisecond && rf.State != Leader {
+			rf.State = Follower
 			//time.Sleep(time.Millisecond * time.Duration(sleepTime))
 			//DPrintf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
 		}
@@ -435,6 +447,7 @@ func (rf *Raft) ticker() {
 				rf.State = Follower
 				//rf.mu.Unlock()
 				DPrintf("Candidate%d failed，term is:%d", rf.me, rf.CurrentTerm)
+				rf.lastActiveTime = time.Now()
 				//rf.mu.Lock()
 				//rf.State = Follower
 				//rf.mu.Unlock()
@@ -459,6 +472,13 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 			if *Done && *votes > len(rf.peers)/2 {
 				rf.State = Leader
 				DPrintf("[%d] we got enough votes, we are now leader (currentTerm=%d)", rf.me, rf.CurrentTerm)
+				for i := 0; i < len(rf.peers); i++ {
+					rf.nextIndex[i] = len(rf.LogEntry)
+				}
+				for i := 0; i < len(rf.peers); i++ {
+					rf.matchIndex[i] = 0
+				}
+
 				*Done = false
 				rf.mu.Unlock()
 				return
@@ -493,13 +513,6 @@ func (rf *Raft) Listen() {
 
 				rf.Heart(&peerId)
 
-				//if isApplied > len(rf.peers)/2 {
-				//	rf.mu.Lock()
-				//	rf.CommitIndex += 1
-				//	isApplied = 0
-				//	rf.mu.Unlock()
-				//}
-
 				time.Sleep(10 * time.Millisecond)
 			}
 
@@ -516,7 +529,6 @@ func (rf *Raft) Heart(peerId *int) {
 	args := &AppendEntries{
 		Term:         rf.CurrentTerm,
 		LeaderId:     rf.me,
-		PreLogIndex:  -2,
 		LeaderCommit: rf.CommitIndex,
 		Entries:      make([]LogEntry, 0),
 	}
@@ -565,7 +577,7 @@ func (rf *Raft) Heart(peerId *int) {
 					continue
 				}
 
-				sortArr = append(sortArr, rf.nextIndex[i])
+				sortArr = append(sortArr, rf.matchIndex[i]+1)
 			}
 
 			sort.Ints(sortArr)
@@ -578,9 +590,9 @@ func (rf *Raft) Heart(peerId *int) {
 			fmt.Println(sortArr)
 		} else {
 			//只有当响应的是日志的并且失败了
-			if args.PreLogIndex != -2 {
+			if len(args.Entries) != 0 {
 				rf.nextIndex[*peerId] -= 1
-				DPrintf("nextInt--")
+				DPrintf("peerId%d nextInt--", *peerId)
 				if rf.nextIndex[*peerId] < 0 {
 					rf.nextIndex[*peerId] = 0
 				}
@@ -603,22 +615,22 @@ func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries
 }
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 
 	if args.Term >= rf.CurrentTerm {
-		rf.mu.Lock()
-		rf.lastActiveTime = time.Now()
+
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
 		//重置当前的投票选择
 		rf.VoteFor = -1
-		//DPrintf("%d receive leaderheart from %d,self_CommitIndex%d,LeaderCommit%d,len(args.Entries):%d", rf.me, args.LeaderId, rf.CommitIndex, args.LeaderCommit, len(args.Entries))
+		DPrintf("%d receive leaderHeart from %d,self_CommitIndex%d,LeaderCommit%d,len(args.Entries):%d", rf.me, args.LeaderId, rf.CommitIndex, args.LeaderCommit, len(args.Entries))
 		reply.Term = rf.CurrentTerm
 
 		//2B
 		//处理和日志有关的
-		if args.PreLogIndex != -2 {
+		if len(args.Entries) != 0 {
 
 			//第一次接受日志
 			if args.PreLogIndex == -1 {
@@ -660,15 +672,15 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 				rf.CommitIndex = len(rf.LogEntry)
 			}
 		}
-		rf.mu.Unlock()
+		rf.lastActiveTime = time.Now()
 	} else if args.Term < rf.CurrentTerm && rf.State != Leader {
-		rf.mu.Lock()
+
 		rf.State = Follower
 		rf.lastActiveTime = time.Now()
 		//rf.CurrentTerm = args.Term
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
-		rf.mu.Unlock()
+
 	}
 
 	//DPrintf("[%d] receive from leader:%d", rf.me, args.CandidateId)
