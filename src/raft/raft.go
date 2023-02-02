@@ -203,9 +203,8 @@ type AppendEntries struct {
 	Term     int //领导者的任期
 	LeaderId int //so follower可以重定向客户端
 	//用于日志复制，确保前面日志能够匹配
-	PreLogIndex  int //紧邻新日志条目的索引
-	PreLogTerm   int //上一页日志索引条目的任期
-	PreCommand   interface{}
+	PreLogIndex  int        //紧邻新日志条目的索引
+	PreLogTerm   int        //上一页日志索引条目的任期
 	Entries      []LogEntry //要存储的日志条目(检测心跳为空;为了提高效率，可以发送多个)
 	LeaderCommit int        //领导者的提交索引
 }
@@ -338,7 +337,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	//通过这个将命令写入领导者里面
 	//leader日志数组里面的实际的索引比认为的小1(因为是从0开始)
 	rf.LogEntry = append(rf.LogEntry, LogEntry{Command: command, Term: rf.CurrentTerm})
-	fmt.Printf("leader%d receive cmd%v\n", rf.me, command)
+
+	fmt.Printf("leader%d receive cmd:%v\n", rf.me, command)
 	//返回命令提交后将出现的索引
 	index = len(rf.LogEntry)
 	term = rf.CurrentTerm
@@ -477,7 +477,7 @@ func (rf *Raft) Listen() {
 	for rf.killed() == false {
 		isApplied := 0
 		//修改nextInt和matchInt数组
-		i := 0
+
 		for rf.State == Leader {
 			//fmt.Println(i)
 			for peerId, _ := range rf.peers {
@@ -500,7 +500,7 @@ func (rf *Raft) Listen() {
 
 				time.Sleep(10 * time.Millisecond)
 			}
-			i++
+
 		}
 
 	}
@@ -523,6 +523,7 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 	//说明有日志还没有复制给follower
 	//DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
 	if len(rf.LogEntry) > rf.nextIndex[*peerId] {
+		fmt.Printf("oneCommand\n")
 		//可能存在多条
 		for i := rf.nextIndex[*peerId]; i < len(rf.LogEntry); i++ {
 			args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
@@ -533,7 +534,6 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 		//最新的新日志为第0个，那么之前日志就不存在
 		if args.PreLogIndex >= 0 {
 			args.PreLogTerm = rf.LogEntry[args.PreLogIndex].Term
-			args.PreCommand = rf.LogEntry[args.PreLogIndex].Command
 		}
 		args.LeaderCommit = rf.CommitIndex
 	}
@@ -541,6 +541,7 @@ func (rf *Raft) Heart(peerId *int, isApplied *int) {
 	reply := &ReceiveEntries{Term: -1, Success: false}
 	//DPrintf("LeaderHeart %d to %d,applyMsg:%d", rf.me, *peerId, len(rf.applyCh))
 	ok := rf.sendHeart(*peerId, args, reply)
+
 	//这里的ok是指发送rpc成功，与reply里面的success无关
 	if ok {
 		if reply.Term > rf.CurrentTerm {
@@ -622,7 +623,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
 				log := rf.LogEntry[args.PreLogIndex]
 				//能否找到一样的
-				if log.Command != args.PreCommand || log.Term != args.PreLogTerm {
+				if log.Term != args.PreLogTerm {
 					reply.Success = false
 					DPrintf("not find same command")
 					rf.mu.Unlock()
