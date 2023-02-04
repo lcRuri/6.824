@@ -228,11 +228,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.State == Leader {
-		//DPrintf("leader%d do not vote to %d", rf.me, args.CandidateId)
-		return
-	}
-
 	if args.Term < rf.CurrentTerm {
 		return
 	}
@@ -253,7 +248,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= len(rf.LogEntry)) {
 			rf.VoteFor = args.CandidateId
 			reply.VoteGranted = true
-			DPrintf("%d vote to %d", rf.me, args.CandidateId)
+			//DPrintf("%d vote to %d", rf.me, args.CandidateId)
 			rf.lastActiveTime = time.Now()
 		}
 	}
@@ -395,6 +390,7 @@ func (rf *Raft) ticker() {
 		//第一次需要等待
 		//rf.wg.Wait()
 
+		time.Sleep(time.Duration(rand.Intn(150)+150) * time.Millisecond)
 		now := time.Now()
 		//rf.waitTime <- rand.Intn(150) + 150
 		timeout := time.Duration(rand.Int31n(300)+150) * time.Millisecond
@@ -406,7 +402,7 @@ func (rf *Raft) ticker() {
 			//DPrintf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
 		}
 
-		if rf.State != Leader && elapses > timeout {
+		if rf.State == Follower && elapses > timeout {
 			//DPrintf("%d time.Now().Sub(rf.lastActiveTime):%d", rf.me, time.Now().Sub(rf.lastActiveTime))
 			rf.lastActiveTime = time.Now()
 			//DPrintf("%d time.Now().Sub(rf.lastActiveTime):%d", rf.me, time.Now().Sub(rf.lastActiveTime))
@@ -451,7 +447,8 @@ func (rf *Raft) ticker() {
 
 			//wg.Wait()
 			if Done == true {
-				//rf.State = Follower
+				votes = 1
+				rf.State = Follower
 				//DPrintf("Candidate%d failed，term is:%d", rf.me, rf.CurrentTerm)
 				rf.lastActiveTime = time.Now()
 			}
@@ -473,13 +470,15 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 	defer rf.mu.Unlock()
 	if ok {
 		if rf.State != Candidate {
+			DPrintf("%d is not candidate", rf.me)
 			return
 		}
 		if reply.VoteGranted == true {
 			*votes++
+			DPrintf("%d vote to %d", peerId, rf.me)
 			if *Done && *votes > len(rf.peers)/2 {
 				rf.State = Leader
-				DPrintf("[%d] we got enough votes, we are now leader (currentTerm=%d)", rf.me, rf.CurrentTerm)
+				DPrintf("[%d] we got enough votes, we are now leader (currentTerm=%d),votes:%d", rf.me, rf.CurrentTerm, *votes)
 				for i := 0; i < len(rf.peers); i++ {
 					rf.nextIndex[i] = len(rf.LogEntry)
 				}
@@ -507,6 +506,9 @@ func (rf *Raft) Listen() {
 		for rf.State == Leader {
 			DPrintf("send heart")
 			for peerId := 0; peerId < len(rf.peers); peerId++ {
+				if rf.State != Leader {
+					break
+				}
 				DPrintf("peerId:%d,len(rf.peers):%d", peerId, len(rf.peers))
 				if peerId == rf.me {
 					DPrintf("not send to self")
@@ -518,7 +520,7 @@ func (rf *Raft) Listen() {
 				time.Sleep(10 * time.Millisecond)
 
 			}
-			time.Sleep(50 * time.Millisecond)
+			//time.Sleep(30 * time.Millisecond)
 		}
 
 	}
@@ -557,7 +559,7 @@ func (rf *Raft) Heart(peerId int) {
 	rf.mu.Unlock()
 	ok := rf.sendHeart(peerId, args, reply)
 	DPrintf("LeaderHeart %d to %d,ok:%v", rf.me, peerId, ok)
-
+	rf.mu.Lock()
 	if ok {
 		if reply.Term > rf.CurrentTerm {
 			rf.CurrentTerm = reply.Term
@@ -601,7 +603,7 @@ func (rf *Raft) Heart(peerId int) {
 			}
 		}
 	}
-
+	rf.mu.Unlock()
 	//这里的ok是指发送rpc成功，与reply里面的success无关
 
 	//DPrintf("%d one heart,rf.nextInt:%d", *peerId, rf.nextIndex[*peerId])
@@ -623,14 +625,26 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 	rf.lastActiveTime = time.Now()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
-	if args.Term < rf.CurrentTerm && rf.State == Leader {
-		DPrintf("higher leader")
-		return
+	if args.Term < rf.CurrentTerm {
+		if rf.State == Leader {
+			//有任期更大的leader发送请求过来了
+			//索性直接给存在的leader节点更新到最新
+			//但是如果日志少的那个节点先一步将日志多的那个变为follower
+			//会出问题
+			//参数中在携带一些东西试试？？
+			//todo 看论文
+			reply.Term = rf.CurrentTerm
+			DPrintf("higher leader")
+			return
+		} else if rf.State != Leader {
+			rf.State = Follower
+			reply.Term = rf.CurrentTerm
+		}
+
 	}
-	if rf.State != Leader {
-		rf.State = Follower
-	}
+
 	if args.Term >= rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
@@ -705,6 +719,7 @@ func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
 			}
 		}()
 
+		DPrintf("%d Log:%v", rf.me, rf.LogEntry)
 		for _, msg := range appliedArr {
 			applyCh <- msg
 			DPrintf("%d commit success", rf.me)
