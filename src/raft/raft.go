@@ -19,7 +19,6 @@ package raft
 
 import (
 	"encoding/gob"
-	"fmt"
 	"math/rand"
 	"sort"
 
@@ -87,17 +86,18 @@ type Raft struct {
 	// state a Raft server must maintain.
 	//图2描述了Raft服务器必须维护的状态。
 	State          int //当前节点的身份
-	CurrentTerm    int //server能看到的最新任期
-	VoteFor        int //候选者Id(在当前任期里面收到的投票，没有为null)
 	lastActiveTime time.Time
-	wg             sync.WaitGroup
-	heartbeat      bool
-	//LeaderId    int
+	leaderId       int
 
+	CurrentTerm int //server能看到的最新任期
+	VoteFor     int //候选者Id(在当前任期里面收到的投票，没有为null)
+	//wg          sync.WaitGroup
 	LogEntry []LogEntry //日志条目 每个日志条目包含对状态机的命令当日志从leader那接收到
+
 	//Volatile State
 	CommitIndex int //已知的索引最高的日志条目将被提交
 	LastApplied int //被应用的状态机索引最高的日志条目
+
 	// 仅Leader，易失状态（成为leader时重置）
 	nextIndex  []int //	每个follower的log同步起点索引（初始为leader log的最后一项）
 	matchIndex []int // 每个follower的log同步进度（初始为0），和nextIndex强关联
@@ -188,7 +188,7 @@ type RequestVoteArgs struct {
 	Term         int //候选者任期
 	CandidateId  int //候选者Id
 	LastLogIndex int //候选者最后的日志索引
-	//LastLogTerm  time.Time //候选者最后的日志条目的期限
+	LastLogTerm  int //候选者最后的日志条目的期限
 }
 
 //
@@ -204,6 +204,7 @@ type RequestVoteReply struct {
 type AppendEntries struct {
 	Term     int //领导者的任期
 	LeaderId int //so follower可以重定向客户端
+
 	//用于日志复制，确保前面日志能够匹配
 	PreLogIndex  int        //紧邻新日志条目的索引
 	PreLogTerm   int        //上一页日志索引条目的任期
@@ -228,7 +229,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	if rf.State == Leader {
-		DPrintf("leader%d do not vote to %d", rf.me, args.CandidateId)
+		//DPrintf("leader%d do not vote to %d", rf.me, args.CandidateId)
 		return
 	}
 
@@ -249,12 +250,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if len(rf.LogEntry) != 0 {
 			lastLogTerm = rf.LogEntry[len(rf.LogEntry)-1].Term
 		}
-		if args.Term < lastLogTerm || args.LastLogIndex < len(rf.LogEntry) {
-			return
+		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= len(rf.LogEntry)) {
+			rf.VoteFor = args.CandidateId
+			reply.VoteGranted = true
+			DPrintf("%d vote to %d", rf.me, args.CandidateId)
+			rf.lastActiveTime = time.Now()
 		}
-		rf.VoteFor = args.CandidateId
-		reply.VoteGranted = true
-		rf.lastActiveTime = time.Now()
 	}
 
 	return
@@ -351,7 +352,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	//leader日志数组里面的实际的索引比认为的小1(因为是从0开始)
 	rf.LogEntry = append(rf.LogEntry, LogEntry{Command: command, Term: rf.CurrentTerm})
 
-	fmt.Printf("leader%d receive cmd:%v\n", rf.me, command)
+	//fmt.Printf("leader%d receive cmd:%v\n", rf.me, command)
 	//返回命令提交后将出现的索引
 	index = len(rf.LogEntry)
 	term = rf.CurrentTerm
@@ -394,19 +395,21 @@ func (rf *Raft) ticker() {
 		//第一次需要等待
 		//rf.wg.Wait()
 
+		now := time.Now()
 		//rf.waitTime <- rand.Intn(150) + 150
-		sleepTime := rand.Intn(450)
-		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
-		rf.lastActiveTime = time.Now()
-
+		timeout := time.Duration(rand.Int31n(300)+150) * time.Millisecond
+		elapses := now.Sub(rf.lastActiveTime)
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
-		for time.Now().Sub(rf.lastActiveTime) <= 300*time.Millisecond && rf.State != Leader {
+		if elapses <= timeout && rf.State != Leader {
 			rf.State = Follower
 			//time.Sleep(time.Millisecond * time.Duration(sleepTime))
 			//DPrintf("[%d] waitTime is:%d, len rf.waitTime:%d,currentTerm:%d,State:%d", rf.me, sleepTime, len(rf.waitTime), rf.CurrentTerm, rf.State)
 		}
 
-		if rf.State != Leader && time.Now().Sub(rf.lastActiveTime) > 300*time.Millisecond {
+		if rf.State != Leader && elapses > timeout {
+			//DPrintf("%d time.Now().Sub(rf.lastActiveTime):%d", rf.me, time.Now().Sub(rf.lastActiveTime))
+			rf.lastActiveTime = time.Now()
+			//DPrintf("%d time.Now().Sub(rf.lastActiveTime):%d", rf.me, time.Now().Sub(rf.lastActiveTime))
 			rf.mu.Lock()
 			//更改自己的身份
 			rf.State = Candidate
@@ -418,6 +421,11 @@ func (rf *Raft) ticker() {
 				CandidateId:  rf.me,
 				LastLogIndex: len(rf.LogEntry),
 			}
+			if len(rf.LogEntry) == 0 {
+				args.LastLogTerm = 0
+			} else {
+				args.LastLogTerm = rf.LogEntry[len(rf.LogEntry)-1].Term
+			}
 			reply := &RequestVoteReply{VoteGranted: false}
 
 			rf.mu.Unlock()
@@ -426,7 +434,7 @@ func (rf *Raft) ticker() {
 			//sends out Request Vote messages to other nodes.
 			DPrintf("[%d] attempting an election at term %d", rf.me, rf.CurrentTerm)
 			Done := true
-			for peerId, _ := range rf.peers {
+			for peerId := 0; peerId < len(rf.peers); peerId++ {
 				if rf.State == Follower {
 					DPrintf("Candidate%d become Follower", rf.me)
 					break
@@ -440,17 +448,12 @@ func (rf *Raft) ticker() {
 				go rf.AskForVote(peerId, &votes, &Done, args, reply)
 				time.Sleep(10 * time.Millisecond)
 			}
+
 			//wg.Wait()
-			//time.Sleep(200 * time.Millisecond)
 			if Done == true {
-				//rf.mu.Lock()
-				rf.State = Follower
-				//rf.mu.Unlock()
-				DPrintf("Candidate%d failed，term is:%d", rf.me, rf.CurrentTerm)
-				rf.lastActiveTime = time.Now()
-				//rf.mu.Lock()
 				//rf.State = Follower
-				//rf.mu.Unlock()
+				//DPrintf("Candidate%d failed，term is:%d", rf.me, rf.CurrentTerm)
+				rf.lastActiveTime = time.Now()
 			}
 		}
 
@@ -458,15 +461,20 @@ func (rf *Raft) ticker() {
 }
 func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVoteArgs, reply *RequestVoteReply) {
 	//defer wg.Done()
+
 	ok := rf.sendRequestVote(peerId, args, reply)
 	if rf.State == Follower {
 		DPrintf("Candidate%d become Follower", rf.me)
 		return
 	}
 	//DPrintf("rf[%d].sendRequestVote([%d], args, reply)", rf.me, peerId)
-	rf.mu.Lock()
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if ok {
+		if rf.State != Candidate {
+			return
+		}
 		if reply.VoteGranted == true {
 			*votes++
 			if *Done && *votes > len(rf.peers)/2 {
@@ -480,18 +488,15 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 				}
 
 				*Done = false
-				rf.mu.Unlock()
 				return
 			}
 			//DPrintf("[%d] got vote from %d", rf.me, peerId)
 		}
 	} else {
-		//DPrintf("rf[%d].sendRequestVote(%d, args, reply) failed", rf.me, peerId)
-		rf.mu.Unlock()
+		DPrintf("rf[%d].sendRequestVote(%d, args, reply) failed", rf.me, peerId)
 		return
 	}
 
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) Listen() {
@@ -499,33 +504,30 @@ func (rf *Raft) Listen() {
 	for rf.killed() == false {
 		//isApplied := 0
 		//修改nextInt和matchInt数组
-
 		for rf.State == Leader {
-			//fmt.Println(i)
-			for peerId, _ := range rf.peers {
-
-				if rf.State != Leader {
-					break
-				}
+			DPrintf("send heart")
+			for peerId := 0; peerId < len(rf.peers); peerId++ {
+				DPrintf("peerId:%d,len(rf.peers):%d", peerId, len(rf.peers))
 				if peerId == rf.me {
+					DPrintf("not send to self")
 					continue
 				}
+				DPrintf("%d send to %d", rf.me, peerId)
 
-				rf.Heart(&peerId)
-
+				go rf.Heart(peerId)
 				time.Sleep(10 * time.Millisecond)
-			}
 
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 
 	}
 
 }
 
-func (rf *Raft) Heart(peerId *int) {
-
+func (rf *Raft) Heart(peerId int) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+
 	args := &AppendEntries{
 		Term:         rf.CurrentTerm,
 		LeaderId:     rf.me,
@@ -536,13 +538,13 @@ func (rf *Raft) Heart(peerId *int) {
 	//如果leader里面的LogEntry数量大于leader已经提交的数量
 	//说明有日志还没有复制给follower
 	//DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
-	if len(rf.LogEntry) > rf.nextIndex[*peerId] {
+	if len(rf.LogEntry) > rf.nextIndex[peerId] {
 		//可能存在多条
-		for i := rf.nextIndex[*peerId]; i < len(rf.LogEntry); i++ {
+		for i := rf.nextIndex[peerId]; i < len(rf.LogEntry); i++ {
 			args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
 		}
 
-		args.PreLogIndex = rf.nextIndex[*peerId] - 1
+		args.PreLogIndex = rf.nextIndex[peerId] - 1
 		//fmt.Printf("[%d] compare prelogindex:%d,commitindex:%d,rf.nextint[*peerid]:%d\n", *peerId, args.PreLogIndex, rf.CommitIndex, rf.nextIndex[*peerId])
 		//最新的新日志为第0个，那么之前日志就不存在
 		if args.PreLogIndex >= 0 {
@@ -552,10 +554,10 @@ func (rf *Raft) Heart(peerId *int) {
 	}
 
 	reply := &ReceiveEntries{Term: -1, Success: false}
-	//DPrintf("LeaderHeart %d to %d,applyMsg:%d", rf.me, *peerId, len(rf.applyCh))
-	ok := rf.sendHeart(*peerId, args, reply)
+	rf.mu.Unlock()
+	ok := rf.sendHeart(peerId, args, reply)
+	DPrintf("LeaderHeart %d to %d,ok:%v", rf.me, peerId, ok)
 
-	//这里的ok是指发送rpc成功，与reply里面的success无关
 	if ok {
 		if reply.Term > rf.CurrentTerm {
 			rf.CurrentTerm = reply.Term
@@ -566,9 +568,9 @@ func (rf *Raft) Heart(peerId *int) {
 		}
 		if reply.Success == true {
 			//*isApplied += 1
-			rf.nextIndex[*peerId] += len(args.Entries)
-			rf.matchIndex[*peerId] = rf.nextIndex[*peerId] - 1
-			DPrintf("rf.nextIndex[*peerId]:%d,rf.matchIndex[*peerId]:%d", rf.nextIndex[*peerId], rf.matchIndex[*peerId])
+			rf.nextIndex[peerId] += len(args.Entries)
+			rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
+			DPrintf("rf.nextIndex[%d]:%d,rf.matchIndex[%d]:%d", peerId, rf.nextIndex[peerId], peerId, rf.matchIndex[peerId])
 
 			//更新commitIndex,
 			sortArr := make([]int, 0)
@@ -584,21 +586,23 @@ func (rf *Raft) Heart(peerId *int) {
 			newCommitIndex := sortArr[len(rf.peers)/2]
 			if newCommitIndex > rf.CommitIndex && rf.LogEntry[newCommitIndex-1].Term == rf.CurrentTerm {
 				rf.CommitIndex = newCommitIndex
-				DPrintf("CommitIndex Updated")
+				DPrintf("Leader%d CommitIndex Updated", rf.me)
 			}
 
-			fmt.Println(sortArr)
+			//fmt.Println(sortArr)
 		} else {
 			//只有当响应的是日志的并且失败了
 			if len(args.Entries) != 0 {
-				rf.nextIndex[*peerId] -= 1
-				DPrintf("peerId%d nextInt--", *peerId)
-				if rf.nextIndex[*peerId] < 0 {
-					rf.nextIndex[*peerId] = 0
+				rf.nextIndex[peerId] -= 1
+				DPrintf("peerId%d nextInt--", peerId)
+				if rf.nextIndex[peerId] < 0 {
+					rf.nextIndex[peerId] = 0
 				}
 			}
 		}
 	}
+
+	//这里的ok是指发送rpc成功，与reply里面的success无关
 
 	//DPrintf("%d one heart,rf.nextInt:%d", *peerId, rf.nextIndex[*peerId])
 	//DPrintf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
@@ -608,6 +612,7 @@ func (rf *Raft) Heart(peerId *int) {
 func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries) bool {
 	ok := rf.peers[peerId].Call("Raft.LeaderHeart", args, reply)
 	if !ok {
+		DPrintf("sendHeart false,%d to %d", rf.me, peerId)
 		return false
 	}
 	return ok
@@ -615,72 +620,64 @@ func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries
 }
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
+	rf.lastActiveTime = time.Now()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
-
+	if args.Term < rf.CurrentTerm && rf.State == Leader {
+		DPrintf("higher leader")
+		return
+	}
+	if rf.State != Leader {
+		rf.State = Follower
+	}
 	if args.Term >= rf.CurrentTerm {
-
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
 		//重置当前的投票选择
 		rf.VoteFor = -1
-		DPrintf("%d receive leaderHeart from %d,self_CommitIndex%d,LeaderCommit%d,len(args.Entries):%d", rf.me, args.LeaderId, rf.CommitIndex, args.LeaderCommit, len(args.Entries))
+		//DPrintf("%d receive leaderHeart from %d,self_CommitIndex%d,LeaderCommit%d,len(args.Entries):%d", rf.me, args.LeaderId, rf.CommitIndex, args.LeaderCommit, len(args.Entries))
 		reply.Term = rf.CurrentTerm
 
-		//2B
-		//处理和日志有关的
-		if len(args.Entries) != 0 {
+	}
 
-			//第一次接受日志
-			if args.PreLogIndex == -1 {
+	rf.lastActiveTime = time.Now()
+	//2B
+	//处理和日志有关的
+	if len(args.Entries) != 0 {
 
-			} else {
+		//第一次接受日志
+		if args.PreLogIndex == -1 {
 
-				log := rf.LogEntry[args.PreLogIndex]
-				//能否找到一样的
-				if log.Term != args.PreLogTerm {
-					reply.Success = false
-					DPrintf("not find same command")
-					rf.mu.Unlock()
-					return
-				}
+		} else {
 
-				//产生冲突，删除这个存在的条目已经之后的
-				if log.Term != args.PreLogTerm {
-					DPrintf("delete pre log")
-					rf.LogEntry = rf.LogEntry[:args.PreLogIndex]
-				}
-
+			log := rf.LogEntry[args.PreLogIndex]
+			//能否找到一样的
+			if log.Term != args.PreLogTerm {
+				reply.Success = false
+				DPrintf("not find same command")
+				return
 			}
-
-			//每次取出一条日志，放到自己的里面去
-			for i := 0; i < len(args.Entries); i++ {
-				rf.LogEntry = append(rf.LogEntry, LogEntry{Command: args.Entries[i].Command, Term: args.Entries[i].Term})
-				fmt.Println("follower", rf.me, rf.LogEntry)
-			}
-
-			reply.Success = true
-			DPrintf("%d receive from %d,dealing log success", rf.me, args.LeaderId)
-			//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 
 		}
 
-		if rf.CommitIndex < args.LeaderCommit {
-			rf.CommitIndex = args.LeaderCommit
-			if len(rf.LogEntry) < rf.CommitIndex {
-				rf.CommitIndex = len(rf.LogEntry)
-			}
+		//每次取出一条日志，放到自己的里面去
+		for i := 0; i < len(args.Entries); i++ {
+			rf.LogEntry = append(rf.LogEntry, LogEntry{Command: args.Entries[i].Command, Term: args.Entries[i].Term})
+			//fmt.Println("follower", rf.me, rf.LogEntry)
 		}
-		rf.lastActiveTime = time.Now()
-	} else if args.Term < rf.CurrentTerm && rf.State != Leader {
 
-		rf.State = Follower
-		rf.lastActiveTime = time.Now()
-		//rf.CurrentTerm = args.Term
-		reply.Term = rf.CurrentTerm
-		reply.Success = false
+		reply.Success = true
+		DPrintf("%d receive from %d,dealing log success", rf.me, args.LeaderId)
+		//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 
+	}
+
+	if rf.CommitIndex < args.LeaderCommit {
+		rf.CommitIndex = args.LeaderCommit
+		if len(rf.LogEntry) < rf.CommitIndex {
+			rf.CommitIndex = len(rf.LogEntry)
+		}
 	}
 
 	//DPrintf("[%d] receive from leader:%d", rf.me, args.CandidateId)
@@ -733,11 +730,11 @@ func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	//raft实例初始化
 	rf := &Raft{
-		mu:          sync.Mutex{},
-		peers:       peers,
-		persister:   persister,
-		me:          me,
-		wg:          sync.WaitGroup{},
+		mu:        sync.Mutex{},
+		peers:     peers,
+		persister: persister,
+		me:        me,
+		//wg:          sync.WaitGroup{},
 		LogEntry:    make([]LogEntry, 0),
 		CommitIndex: 0,
 		LastApplied: 0,
@@ -750,6 +747,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.CurrentTerm = 0
 	rf.VoteFor = -1
 	rf.lastActiveTime = time.Now()
+
 	// initialize from state persisted before a crash
 	//在崩溃前持续从状态初始化
 	rf.readPersist(persister.ReadRaftState())
