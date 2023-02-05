@@ -484,9 +484,6 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 				DPrintf("[%d] we got enough votes, we are now leader (currentTerm=%d),votes:%d", rf.me, rf.CurrentTerm, *votes)
 				//成为leader后需要初始化nextIndex和matchIndex
 				for i := 0; i < len(rf.peers); i++ {
-					//和论文中不一样 如果全部重新初始化为0的话
-					//但是可以通过所有测试
-					//todo
 					rf.nextIndex[i] = len(rf.LogEntry) + 1
 				}
 				for i := 0; i < len(rf.peers); i++ {
@@ -508,8 +505,7 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 func (rf *Raft) Listen() {
 
 	for rf.killed() == false {
-		//isApplied := 0
-		//修改nextInt和matchInt数组
+
 		for rf.State == Leader {
 			DPrintf("send heart")
 			for peerId := 0; peerId < len(rf.peers); peerId++ {
@@ -642,13 +638,12 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		return
 	}
 
-	//第一次接受日志
-
 	// 如果本地有前一个日志的话，那么term必须相同，否则false
 	if args.PreLogIndex > 0 && rf.LogEntry[args.PreLogIndex-1].Term != args.PreLogTerm {
 		return
 	}
 
+	//会进行强制覆盖重写
 	for i, entry := range args.Entries {
 		index := args.PreLogIndex + i + 1
 		if index >= len(rf.LogEntry) {
