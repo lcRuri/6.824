@@ -487,7 +487,7 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 					//和论文中不一样 如果全部重新初始化为0的话
 					//但是可以通过所有测试
 					//todo
-					rf.nextIndex[i] = 0
+					rf.nextIndex[i] = len(rf.LogEntry) + 1
 				}
 				for i := 0; i < len(rf.peers); i++ {
 					rf.matchIndex[i] = 0
@@ -516,12 +516,11 @@ func (rf *Raft) Listen() {
 				if rf.State != Leader {
 					break
 				}
-				DPrintf("peerId:%d,len(rf.peers):%d", peerId, len(rf.peers))
+
 				if peerId == rf.me {
 					DPrintf("not send to self")
 					continue
 				}
-				DPrintf("%d send to %d", rf.me, peerId)
 
 				go rf.Heart(peerId)
 				time.Sleep(10 * time.Millisecond)
@@ -544,23 +543,13 @@ func (rf *Raft) Heart(peerId int) {
 		Entries:      make([]LogEntry, 0),
 	}
 
-	//如果leader里面的LogEntry数量大于leader已经提交的数量
-	//说明有日志还没有复制给follower
-	//DPrintf("len(rf.LogEntry):%d,rf.CommitIndex:%d", len(rf.LogEntry), rf.CommitIndex)
-	if len(rf.LogEntry) > rf.nextIndex[peerId] {
-		//可能存在多条
-		for i := rf.nextIndex[peerId]; i < len(rf.LogEntry); i++ {
-			args.Entries = append(args.Entries, LogEntry{Command: rf.LogEntry[i].Command, Term: rf.LogEntry[i].Term})
-		}
-
-		args.PreLogIndex = rf.nextIndex[peerId] - 1
-		//fmt.Printf("[%d] compare prelogindex:%d,commitindex:%d,rf.nextint[*peerid]:%d\n", *peerId, args.PreLogIndex, rf.CommitIndex, rf.nextIndex[*peerId])
-		//最新的新日志为第0个，那么之前日志就不存在
-		if args.PreLogIndex >= 0 {
-			args.PreLogTerm = rf.LogEntry[args.PreLogIndex].Term
-		}
-		args.LeaderCommit = rf.CommitIndex
+	args.PreLogIndex = rf.nextIndex[peerId] - 1
+	//fmt.Printf("[%d] compare prelogindex:%d,commitindex:%d,rf.nextint[*peerid]:%d\n", *peerId, args.PreLogIndex, rf.CommitIndex, rf.nextIndex[*peerId])
+	//最新的新日志为第0个，那么之前日志就不存在
+	if args.PreLogIndex > 0 {
+		args.PreLogTerm = rf.LogEntry[args.PreLogIndex-1].Term
 	}
+	args.Entries = append(args.Entries, rf.LogEntry[rf.nextIndex[peerId]-1:]...)
 
 	reply := &ReceiveEntries{Term: -1, Success: false}
 	rf.mu.Unlock()
@@ -577,7 +566,7 @@ func (rf *Raft) Heart(peerId int) {
 			return
 		}
 		if reply.Success == true {
-			//*isApplied += 1
+
 			rf.nextIndex[peerId] += len(args.Entries)
 			rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
 			DPrintf("rf.nextIndex[%d]:%d,rf.matchIndex[%d]:%d", peerId, rf.nextIndex[peerId], peerId, rf.matchIndex[peerId])
@@ -589,7 +578,7 @@ func (rf *Raft) Heart(peerId int) {
 					continue
 				}
 
-				sortArr = append(sortArr, rf.matchIndex[i]+1)
+				sortArr = append(sortArr, rf.matchIndex[i])
 			}
 
 			sort.Ints(sortArr)
@@ -602,13 +591,12 @@ func (rf *Raft) Heart(peerId int) {
 			//fmt.Println(sortArr)
 		} else {
 			//只有当响应的是日志的并且失败了
-			if len(args.Entries) != 0 {
-				rf.nextIndex[peerId] -= 1
-				DPrintf("peerId%d nextInt-- is %d", peerId, rf.nextIndex[peerId])
-				if rf.nextIndex[peerId] < 0 {
-					rf.nextIndex[peerId] = 0
-				}
+			rf.nextIndex[peerId] -= 1
+			DPrintf("peerId%d nextInt-- is %d", peerId, rf.nextIndex[peerId])
+			if rf.nextIndex[peerId] < 0 {
+				rf.nextIndex[peerId] = 0
 			}
+
 		}
 	}
 	rf.mu.Unlock()
@@ -650,47 +638,33 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
 	//2B
 	//处理和日志有关的
-	if len(args.Entries) != 0 {
-
-		//第一次接受日志
-		if args.PreLogIndex == -1 {
-
-		} else {
-			DPrintf("args.PreLogIndex:%d", args.PreLogIndex)
-			log := rf.LogEntry[args.PreLogIndex]
-			//能否找到一样的
-			if log.Term != args.PreLogTerm {
-				reply.Success = false
-				DPrintf("not find same command")
-				return
-			}
-
-		}
-
-		//每次取出一条日志，放到自己的里面去
-		//for i := 0; i < len(args.Entries); i++ {
-		//	rf.LogEntry = append(rf.LogEntry, LogEntry{Command: args.Entries[i].Command, Term: args.Entries[i].Term})
-		//	//fmt.Println("follower", rf.me, rf.LogEntry)
-		//}
-
-		for i, entry := range args.Entries {
-			index := args.PreLogIndex + i + 1
-			if index >= len(rf.LogEntry) {
-				rf.LogEntry = append(rf.LogEntry, entry)
-			} else {
-				if rf.LogEntry[index].Term != entry.Term {
-					DPrintf("log not same")
-					rf.LogEntry = rf.LogEntry[:index]
-					rf.LogEntry = append(rf.LogEntry, entry)
-				}
-			}
-		}
-
-		reply.Success = true
-		DPrintf("%d receive from %d,dealing log success", rf.me, args.LeaderId)
-		//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
-
+	if len(rf.LogEntry) < args.PreLogIndex {
+		return
 	}
+
+	//第一次接受日志
+
+	// 如果本地有前一个日志的话，那么term必须相同，否则false
+	if args.PreLogIndex > 0 && rf.LogEntry[args.PreLogIndex-1].Term != args.PreLogTerm {
+		return
+	}
+
+	for i, entry := range args.Entries {
+		index := args.PreLogIndex + i + 1
+		if index >= len(rf.LogEntry) {
+			rf.LogEntry = append(rf.LogEntry, entry)
+		} else {
+			if rf.LogEntry[index].Term != entry.Term {
+				DPrintf("log not same")
+				rf.LogEntry = rf.LogEntry[:index-1]
+				rf.LogEntry = append(rf.LogEntry, entry)
+			}
+		}
+	}
+
+	reply.Success = true
+	DPrintf("%d receive from %d,dealing log success", rf.me, args.LeaderId)
+	//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 
 	if rf.CommitIndex < args.LeaderCommit {
 		rf.CommitIndex = args.LeaderCommit
