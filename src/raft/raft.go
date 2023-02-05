@@ -19,6 +19,7 @@ package raft
 
 import (
 	"encoding/gob"
+	"fmt"
 	"math/rand"
 	"sort"
 
@@ -347,7 +348,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	//leader日志数组里面的实际的索引比认为的小1(因为是从0开始)
 	rf.LogEntry = append(rf.LogEntry, LogEntry{Command: command, Term: rf.CurrentTerm})
 
-	//fmt.Printf("leader%d receive cmd:%v\n", rf.me, command)
+	fmt.Printf("leader%d receive cmd:%v\n", rf.me, command)
 	//返回命令提交后将出现的索引
 	index = len(rf.LogEntry)
 	term = rf.CurrentTerm
@@ -520,7 +521,7 @@ func (rf *Raft) Listen() {
 				time.Sleep(10 * time.Millisecond)
 
 			}
-			//time.Sleep(30 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 		}
 
 	}
@@ -565,7 +566,7 @@ func (rf *Raft) Heart(peerId int) {
 			rf.CurrentTerm = reply.Term
 			//rf.State = Follower
 			//DPrintf("%d reconnect to net,not leader now", rf.me)
-			DPrintf("leader%d term is %d", rf.me, rf.CurrentTerm)
+			DPrintf("leader%d term changed is %d", rf.me, rf.CurrentTerm)
 			//go func() { rf.waitTime <- rand.Intn(200) + 200 }()
 		}
 		if reply.Success == true {
@@ -635,12 +636,13 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 			//会出问题
 			//参数中在携带一些东西试试？？
 			//todo 看论文
-			reply.Term = rf.CurrentTerm
+
 			DPrintf("higher leader")
 			return
 		} else if rf.State != Leader {
 			rf.State = Follower
 			reply.Term = rf.CurrentTerm
+			DPrintf("term high follower receive heart")
 		}
 
 	}
@@ -648,14 +650,13 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 	if args.Term >= rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
-		//重置当前的投票选择
-		rf.VoteFor = -1
+		////重置当前的投票选择
+		//rf.VoteFor = -1
 		//DPrintf("%d receive leaderHeart from %d,self_CommitIndex%d,LeaderCommit%d,len(args.Entries):%d", rf.me, args.LeaderId, rf.CommitIndex, args.LeaderCommit, len(args.Entries))
 		reply.Term = rf.CurrentTerm
-
+		rf.lastActiveTime = time.Now()
 	}
 
-	rf.lastActiveTime = time.Now()
 	//2B
 	//处理和日志有关的
 	if len(args.Entries) != 0 {
@@ -664,7 +665,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		if args.PreLogIndex == -1 {
 
 		} else {
-
+			DPrintf("args.PreLogIndex:%d", args.PreLogIndex)
 			log := rf.LogEntry[args.PreLogIndex]
 			//能否找到一样的
 			if log.Term != args.PreLogTerm {
@@ -676,9 +677,22 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		}
 
 		//每次取出一条日志，放到自己的里面去
-		for i := 0; i < len(args.Entries); i++ {
-			rf.LogEntry = append(rf.LogEntry, LogEntry{Command: args.Entries[i].Command, Term: args.Entries[i].Term})
-			//fmt.Println("follower", rf.me, rf.LogEntry)
+		//for i := 0; i < len(args.Entries); i++ {
+		//	rf.LogEntry = append(rf.LogEntry, LogEntry{Command: args.Entries[i].Command, Term: args.Entries[i].Term})
+		//	//fmt.Println("follower", rf.me, rf.LogEntry)
+		//}
+
+		for i, entry := range args.Entries {
+			index := args.PreLogIndex + i + 1
+			if index >= len(rf.LogEntry) {
+				rf.LogEntry = append(rf.LogEntry, entry)
+			} else {
+				if rf.LogEntry[index].Term != entry.Term {
+					DPrintf("log not same")
+					rf.LogEntry = rf.LogEntry[:index]
+					rf.LogEntry = append(rf.LogEntry, entry)
+				}
+			}
 		}
 
 		reply.Success = true
