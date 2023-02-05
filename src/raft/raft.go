@@ -19,7 +19,6 @@ package raft
 
 import (
 	"encoding/gob"
-	"fmt"
 	"math/rand"
 	"sort"
 
@@ -348,7 +347,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	//leader日志数组里面的实际的索引比认为的小1(因为是从0开始)
 	rf.LogEntry = append(rf.LogEntry, LogEntry{Command: command, Term: rf.CurrentTerm})
 
-	fmt.Printf("leader%d receive cmd:%v\n", rf.me, command)
+	DPrintf("leader%d receive cmd:%v\n", rf.me, command)
 	//返回命令提交后将出现的索引
 	index = len(rf.LogEntry)
 	term = rf.CurrentTerm
@@ -433,7 +432,7 @@ func (rf *Raft) ticker() {
 			Done := true
 			for peerId := 0; peerId < len(rf.peers); peerId++ {
 				if rf.State == Follower {
-					DPrintf("Candidate%d become Follower", rf.me)
+					DPrintf("Candidate%d become Follower term:%d ticker", rf.me, rf.CurrentTerm)
 					break
 				}
 				if peerId == rf.me {
@@ -462,7 +461,7 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 
 	ok := rf.sendRequestVote(peerId, args, reply)
 	if rf.State == Follower {
-		DPrintf("Candidate%d become Follower", rf.me)
+		DPrintf("Candidate%d become Follower term:%d AskForVote", rf.me, rf.CurrentTerm)
 		return
 	}
 	//DPrintf("rf[%d].sendRequestVote([%d], args, reply)", rf.me, peerId)
@@ -471,7 +470,10 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 	defer rf.mu.Unlock()
 	if ok {
 		if rf.State != Candidate {
-			DPrintf("%d is not candidate", rf.me)
+			DPrintf("%d is not candidate term:%d", rf.me, rf.CurrentTerm)
+			if rf.State == Leader {
+				*Done = false
+			}
 			return
 		}
 		if reply.VoteGranted == true {
@@ -480,8 +482,12 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 			if *Done && *votes > len(rf.peers)/2 {
 				rf.State = Leader
 				DPrintf("[%d] we got enough votes, we are now leader (currentTerm=%d),votes:%d", rf.me, rf.CurrentTerm, *votes)
+				//成为leader后需要初始化nextIndex和matchIndex
 				for i := 0; i < len(rf.peers); i++ {
-					rf.nextIndex[i] = len(rf.LogEntry)
+					//和论文中不一样 如果全部重新初始化为0的话
+					//但是可以通过所有测试
+					//todo
+					rf.nextIndex[i] = 0
 				}
 				for i := 0; i < len(rf.peers); i++ {
 					rf.matchIndex[i] = 0
@@ -563,11 +569,12 @@ func (rf *Raft) Heart(peerId int) {
 	rf.mu.Lock()
 	if ok {
 		if reply.Term > rf.CurrentTerm {
+			rf.State = Follower
 			rf.CurrentTerm = reply.Term
-			//rf.State = Follower
-			//DPrintf("%d reconnect to net,not leader now", rf.me)
-			DPrintf("leader%d term changed is %d", rf.me, rf.CurrentTerm)
-			//go func() { rf.waitTime <- rand.Intn(200) + 200 }()
+			rf.VoteFor = -1
+			rf.leaderId = -1
+			rf.mu.Unlock()
+			return
 		}
 		if reply.Success == true {
 			//*isApplied += 1
@@ -589,7 +596,7 @@ func (rf *Raft) Heart(peerId int) {
 			newCommitIndex := sortArr[len(rf.peers)/2]
 			if newCommitIndex > rf.CommitIndex && rf.LogEntry[newCommitIndex-1].Term == rf.CurrentTerm {
 				rf.CommitIndex = newCommitIndex
-				DPrintf("Leader%d CommitIndex Updated", rf.me)
+				DPrintf("Leader%d CommitIndex Updated is %d", rf.me, rf.CommitIndex)
 			}
 
 			//fmt.Println(sortArr)
@@ -597,7 +604,7 @@ func (rf *Raft) Heart(peerId int) {
 			//只有当响应的是日志的并且失败了
 			if len(args.Entries) != 0 {
 				rf.nextIndex[peerId] -= 1
-				DPrintf("peerId%d nextInt--", peerId)
+				DPrintf("peerId%d nextInt-- is %d", peerId, rf.nextIndex[peerId])
 				if rf.nextIndex[peerId] < 0 {
 					rf.nextIndex[peerId] = 0
 				}
@@ -605,10 +612,6 @@ func (rf *Raft) Heart(peerId int) {
 		}
 	}
 	rf.mu.Unlock()
-	//这里的ok是指发送rpc成功，与reply里面的success无关
-
-	//DPrintf("%d one heart,rf.nextInt:%d", *peerId, rf.nextIndex[*peerId])
-	//DPrintf("rf.peers[%d].Call(Raft.Heart, args, reply)", peerId)
 
 }
 
@@ -623,33 +626,21 @@ func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries
 }
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
-	rf.lastActiveTime = time.Now()
+	//rf.lastActiveTime = time.Now()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 	if args.Term < rf.CurrentTerm {
-		if rf.State == Leader {
-			//有任期更大的leader发送请求过来了
-			//索性直接给存在的leader节点更新到最新
-			//但是如果日志少的那个节点先一步将日志多的那个变为follower
-			//会出问题
-			//参数中在携带一些东西试试？？
-			//todo 看论文
-
-			DPrintf("higher leader")
-			return
-		} else if rf.State != Leader {
-			rf.State = Follower
-			reply.Term = rf.CurrentTerm
-			DPrintf("term high follower receive heart")
-		}
-
+		reply.Term = rf.CurrentTerm
+		reply.Success = false
+		return
 	}
 
 	if args.Term >= rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
+		rf.leaderId = args.LeaderId
 		////重置当前的投票选择
 		//rf.VoteFor = -1
 		//DPrintf("%d receive leaderHeart from %d,self_CommitIndex%d,LeaderCommit%d,len(args.Entries):%d", rf.me, args.LeaderId, rf.CommitIndex, args.LeaderCommit, len(args.Entries))
