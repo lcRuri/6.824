@@ -417,6 +417,9 @@ func (rf *Raft) ticker() {
 			//投票给自己
 			rf.VoteFor = rf.me
 			rf.CurrentTerm = rf.CurrentTerm + 1
+
+			rf.persist()
+
 			args := &RequestVoteArgs{
 				Term:         rf.CurrentTerm,
 				CandidateId:  rf.me,
@@ -515,39 +518,40 @@ func (rf *Raft) Listen() {
 					continue
 				}
 
-				go rf.Heart(peerId)
+				rf.mu.Lock()
+				args := &AppendEntries{
+					Term:         rf.CurrentTerm,
+					LeaderId:     rf.me,
+					LeaderCommit: rf.CommitIndex,
+					Entries:      make([]LogEntry, 0),
+				}
+
+				args.PreLogIndex = rf.nextIndex[peerId] - 1
+				//fmt.Printf("[%d] compare prelogindex:%d,commitindex:%d,rf.nextint[*peerid]:%d\n", *peerId, args.PreLogIndex, rf.CommitIndex, rf.nextIndex[*peerId])
+				//最新的新日志为第0个，那么之前日志就不存在
+				if args.PreLogIndex > 0 {
+					args.PreLogTerm = rf.LogEntry[args.PreLogIndex-1].Term
+				}
+				args.Entries = append(args.Entries, rf.LogEntry[rf.nextIndex[peerId]-1:]...)
+				rf.mu.Unlock()
+
+				go rf.Heart(peerId, args)
 				time.Sleep(10 * time.Millisecond)
 
 			}
 			rf.persist()
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 		}
 
 	}
 
 }
 
-func (rf *Raft) Heart(peerId int) {
-	rf.mu.Lock()
-
-	args := &AppendEntries{
-		Term:         rf.CurrentTerm,
-		LeaderId:     rf.me,
-		LeaderCommit: rf.CommitIndex,
-		Entries:      make([]LogEntry, 0),
-	}
-
-	args.PreLogIndex = rf.nextIndex[peerId] - 1
-	//fmt.Printf("[%d] compare prelogindex:%d,commitindex:%d,rf.nextint[*peerid]:%d\n", *peerId, args.PreLogIndex, rf.CommitIndex, rf.nextIndex[*peerId])
-	//最新的新日志为第0个，那么之前日志就不存在
-	if args.PreLogIndex > 0 {
-		args.PreLogTerm = rf.LogEntry[args.PreLogIndex-1].Term
-	}
-	args.Entries = append(args.Entries, rf.LogEntry[rf.nextIndex[peerId]-1:]...)
+func (rf *Raft) Heart(peerId int, args *AppendEntries) {
 
 	reply := &ReceiveEntries{Term: -1, Success: false}
-	rf.mu.Unlock()
 	ok := rf.sendHeart(peerId, args, reply)
+
 	DPrintf("LeaderHeart %d to %d,ok:%v", rf.me, peerId, ok)
 	rf.mu.Lock()
 	if ok {
@@ -556,6 +560,9 @@ func (rf *Raft) Heart(peerId int) {
 			rf.CurrentTerm = reply.Term
 			rf.VoteFor = -1
 			rf.leaderId = -1
+
+			rf.persist()
+
 			rf.lastActiveTime = time.Now()
 			DPrintf("find high term not leader")
 			rf.mu.Unlock()
@@ -616,13 +623,18 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		return
 	}
 
-	if args.Term >= rf.CurrentTerm {
+	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
-		rf.leaderId = args.LeaderId
+		rf.VoteFor = -1
+		rf.leaderId = -1
 		reply.Term = rf.CurrentTerm
-		rf.lastActiveTime = time.Now()
+		rf.persist()
 	}
+
+	rf.leaderId = args.LeaderId
+	rf.lastActiveTime = time.Now()
+
 	DPrintf("[%d]->[%d] len(rf.LogEntry):%d args.PreLogIndex:%d args.PreLogTerm:%d", args.LeaderId, rf.me, len(rf.LogEntry), args.PreLogIndex, args.PreLogTerm)
 	//2B
 	//处理和日志有关的
@@ -649,6 +661,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 			}
 		}
 	}
+	rf.persist()
 
 	reply.Success = true
 	DPrintf("%d receive from %d,dealing log success", rf.me, args.LeaderId)
