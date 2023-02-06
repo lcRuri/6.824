@@ -237,12 +237,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if rf.CurrentTerm < args.Term {
-		//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
 		rf.VoteFor = -1
-		//DPrintf("[%d] sending granted vote to %d", rf.me, args.CandidateId)
-		//go func() { rf.waitTime <- rand.Intn(450) + 150 }()
+
 	}
 
 	if rf.VoteFor == -1 || rf.VoteFor == args.CandidateId {
@@ -250,11 +248,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if len(rf.LogEntry) != 0 {
 			lastLogTerm = rf.LogEntry[len(rf.LogEntry)-1].Term
 		}
+		DPrintf("%d to %d --args.LastLogTerm:%d lastLogTerm:%d args.LastLogIndex:%d len(rf.LogEntry):%d", args.CandidateId, rf.me, args.LastLogTerm, lastLogTerm, args.LastLogIndex, len(rf.LogEntry))
+
 		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= len(rf.LogEntry)) {
 			rf.VoteFor = args.CandidateId
 			reply.VoteGranted = true
-			//DPrintf("%d vote to %d", rf.me, args.CandidateId)
 			rf.lastActiveTime = time.Now()
+		} else {
+			reply.VoteGranted = false
 		}
 	}
 
@@ -310,9 +311,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 	//需要进行群发
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	if reply.VoteGranted == false {
-		return false
-	}
 	//看看收到的选票结果
 	return ok
 }
@@ -354,7 +352,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	//leader日志数组里面的实际的索引比认为的小1(因为是从0开始)
 	rf.LogEntry = append(rf.LogEntry, LogEntry{Command: command, Term: rf.CurrentTerm})
 
-	DPrintf("leader%d receive cmd:%v\n", rf.me, command)
+	DPrintf("leader%d receive cmd:%v,term:%d\n", rf.me, command, rf.CurrentTerm)
 	//返回命令提交后将出现的索引
 	index = len(rf.LogEntry)
 	term = rf.CurrentTerm
@@ -429,7 +427,6 @@ func (rf *Raft) ticker() {
 			} else {
 				args.LastLogTerm = rf.LogEntry[len(rf.LogEntry)-1].Term
 			}
-			reply := &RequestVoteReply{VoteGranted: false}
 
 			rf.mu.Unlock()
 			votes := 1
@@ -443,12 +440,10 @@ func (rf *Raft) ticker() {
 					break
 				}
 				if peerId == rf.me {
-					//DPrintf("%d not send request to %d", rf.me, peerId)
 					continue
 				}
 				//需要等，不然for比go携程快，经典问题
-				//wg.Add(1)
-				go rf.AskForVote(peerId, &votes, &Done, args, reply)
+				go rf.AskForVote(peerId, &votes, &Done, args)
 				time.Sleep(10 * time.Millisecond)
 			}
 
@@ -456,22 +451,16 @@ func (rf *Raft) ticker() {
 			if Done == true {
 				votes = 1
 				rf.State = Follower
-				//DPrintf("Candidate%d failed，term is:%d", rf.me, rf.CurrentTerm)
 				rf.lastActiveTime = time.Now()
 			}
 		}
 
 	}
 }
-func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVoteArgs, reply *RequestVoteReply) {
-	//defer wg.Done()
+func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVoteArgs) {
 
+	reply := &RequestVoteReply{VoteGranted: false}
 	ok := rf.sendRequestVote(peerId, args, reply)
-	if rf.State == Follower {
-		DPrintf("Candidate%d become Follower term:%d AskForVote", rf.me, rf.CurrentTerm)
-		return
-	}
-	//DPrintf("rf[%d].sendRequestVote([%d], args, reply)", rf.me, peerId)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -483,6 +472,7 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 			}
 			return
 		}
+		DPrintf("reply.VoteGranted:%v,term:%d", reply.VoteGranted, args.Term)
 		if reply.VoteGranted == true {
 			*votes++
 			DPrintf("%d vote to %d", peerId, rf.me)
@@ -500,7 +490,6 @@ func (rf *Raft) AskForVote(peerId int, votes *int, Done *bool, args *RequestVote
 				*Done = false
 				return
 			}
-			//DPrintf("[%d] got vote from %d", rf.me, peerId)
 		}
 	} else {
 		DPrintf("rf[%d].sendRequestVote(%d, args, reply) failed", rf.me, peerId)
@@ -514,14 +503,14 @@ func (rf *Raft) Listen() {
 	for rf.killed() == false {
 
 		for rf.State == Leader {
-			DPrintf("send heart")
+			//DPrintf("send heart")
 			for peerId := 0; peerId < len(rf.peers); peerId++ {
 				if rf.State != Leader {
 					break
 				}
 
 				if peerId == rf.me {
-					DPrintf("not send to self")
+					//DPrintf("not send to self")
 					continue
 				}
 
@@ -565,6 +554,8 @@ func (rf *Raft) Heart(peerId int) {
 			rf.CurrentTerm = reply.Term
 			rf.VoteFor = -1
 			rf.leaderId = -1
+			rf.lastActiveTime = time.Now()
+			DPrintf("find high term not leader")
 			rf.mu.Unlock()
 			return
 		}
@@ -608,20 +599,15 @@ func (rf *Raft) Heart(peerId int) {
 
 func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries) bool {
 	ok := rf.peers[peerId].Call("Raft.LeaderHeart", args, reply)
-	if !ok {
-		DPrintf("sendHeart false,%d to %d", rf.me, peerId)
-		return false
-	}
 	return ok
 
 }
 
 func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
-	//rf.lastActiveTime = time.Now()
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
@@ -632,13 +618,10 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 		rf.CurrentTerm = args.Term
 		rf.State = Follower
 		rf.leaderId = args.LeaderId
-		////重置当前的投票选择
-		//rf.VoteFor = -1
-		//DPrintf("%d receive leaderHeart from %d,self_CommitIndex%d,LeaderCommit%d,len(args.Entries):%d", rf.me, args.LeaderId, rf.CommitIndex, args.LeaderCommit, len(args.Entries))
 		reply.Term = rf.CurrentTerm
 		rf.lastActiveTime = time.Now()
 	}
-
+	DPrintf("[%d]->[%d] len(rf.LogEntry):%d args.PreLogIndex:%d args.PreLogTerm:%d", args.LeaderId, rf.me, len(rf.LogEntry), args.PreLogIndex, args.PreLogTerm)
 	//2B
 	//处理和日志有关的
 	if len(rf.LogEntry) < args.PreLogIndex {
@@ -651,12 +634,13 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 	}
 
 	//会进行强制覆盖重写
+	//important
 	for i, entry := range args.Entries {
 		index := args.PreLogIndex + i + 1
-		if index >= len(rf.LogEntry) {
+		if index > len(rf.LogEntry) {
 			rf.LogEntry = append(rf.LogEntry, entry)
 		} else {
-			if rf.LogEntry[index].Term != entry.Term {
+			if rf.LogEntry[index-1].Term != entry.Term {
 				DPrintf("log not same")
 				rf.LogEntry = rf.LogEntry[:index-1]
 				rf.LogEntry = append(rf.LogEntry, entry)
@@ -695,16 +679,16 @@ func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
 					CommandIndex: (rf.LastApplied + 1),
 				})
 
-				DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied].Command, rf.LastApplied)
+				//DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied].Command, rf.LastApplied)
 				rf.LastApplied += 1
-				//fmt.Println(rf.CommitIndex, rf.LastApplied)
+
 			}
 		}()
 
 		DPrintf("%d Log:%v", rf.me, rf.LogEntry)
 		for _, msg := range appliedArr {
 			applyCh <- msg
-			DPrintf("%d commit success", rf.me)
+			DPrintf("%d command:%v commit success", rf.me, msg.Command)
 		}
 	}
 }
