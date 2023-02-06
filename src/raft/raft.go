@@ -503,6 +503,7 @@ func (rf *Raft) Listen() {
 	for rf.killed() == false {
 
 		for rf.State == Leader {
+
 			//DPrintf("send heart")
 			for peerId := 0; peerId < len(rf.peers); peerId++ {
 				if rf.State != Leader {
@@ -518,6 +519,7 @@ func (rf *Raft) Listen() {
 				time.Sleep(10 * time.Millisecond)
 
 			}
+			rf.persist()
 			time.Sleep(20 * time.Millisecond)
 		}
 
