@@ -154,6 +154,8 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var voteFor int
 	var log []LogEntry
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	//返回值是error，不为空说明有错
 	if d.Decode(&currentTerm) != nil || d.Decode(&voteFor) != nil || d.Decode(&log) != nil {
 		DPrintf("readPersist failed")
@@ -218,8 +220,10 @@ type AppendEntries struct {
 }
 
 type ReceiveEntries struct {
-	Term    int  //目前的任期，为了领导者去更新自己的任期
-	Success bool //如果追随者包含与 prevLogIndex 和 preLogTerm 匹配的条目，则为 true
+	Term          int  //目前的任期，为了领导者去更新自己的任期
+	Success       bool //如果追随者包含与 prevLogIndex 和 preLogTerm 匹配的条目，则为 true
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 //
@@ -397,8 +401,8 @@ func (rf *Raft) ticker() {
 
 		time.Sleep(time.Duration(rand.Intn(150)+150) * time.Millisecond)
 		now := time.Now()
-		//rf.waitTime <- rand.Intn(150) + 150
-		timeout := time.Duration(rand.Int31n(300)+150) * time.Millisecond
+
+		timeout := time.Duration(rand.Int31n(600)+600) * time.Millisecond
 		elapses := now.Sub(rf.lastActiveTime)
 		//等待过程中没有收到leader的心跳或者选举的，发起选举
 		if elapses <= timeout && rf.State != Leader {
@@ -570,7 +574,8 @@ func (rf *Raft) Heart(peerId int, args *AppendEntries) {
 		}
 		if reply.Success == true {
 
-			rf.nextIndex[peerId] += len(args.Entries)
+			//可能将部分截断，和之前的nextIndex不一样，所以不能直接加上len(args.Entries)
+			rf.nextIndex[peerId] = args.PreLogIndex + len(args.Entries) + 1
 			rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
 			DPrintf("rf.nextIndex[%d]:%d,rf.matchIndex[%d]:%d", peerId, rf.nextIndex[peerId], peerId, rf.matchIndex[peerId])
 
@@ -593,17 +598,29 @@ func (rf *Raft) Heart(peerId int, args *AppendEntries) {
 
 			//fmt.Println(sortArr)
 		} else {
-			//只有当响应的是日志的并且失败了
-			rf.nextIndex[peerId] -= 1
-			DPrintf("peerId%d nextInt-- is %d", peerId, rf.nextIndex[peerId])
-			if rf.nextIndex[peerId] < 0 {
-				rf.nextIndex[peerId] = 0
-			}
+			nextIndexBefore := rf.nextIndex[peerId] // 仅为打印log
 
+			if reply.ConflictTerm != -1 { // follower的prevLogIndex位置term不同
+				conflictTermIndex := -1
+				for index := args.PreLogIndex; index >= 1; index-- { // 找最后一个conflictTerm
+					if rf.LogEntry[index-1].Term == reply.ConflictTerm {
+						conflictTermIndex = index
+						break
+					}
+				}
+				if conflictTermIndex != -1 { // leader也存在冲突term的日志，则从term最后一次出现之后的日志开始尝试同步，因为leader/follower可能在该term的日志有部分相同
+					rf.nextIndex[peerId] = conflictTermIndex + 1
+				} else { // leader并没有term的日志，那么把follower日志中该term首次出现的位置作为尝试同步的位置，即截断follower在此term的所有日志
+					rf.nextIndex[peerId] = reply.ConflictIndex
+				}
+			} else { // follower的prevLogIndex位置没有日志
+				rf.nextIndex[peerId] = reply.ConflictIndex + 1
+			}
+			DPrintf("RaftNode[%d] back-off nextIndex, peer[%d] nextIndexBefore[%d] nextIndex[%d]", rf.me, peerId, nextIndexBefore, rf.nextIndex[peerId])
 		}
+
 	}
 	rf.mu.Unlock()
-
 }
 
 func (rf *Raft) sendHeart(peerId int, args *AppendEntries, reply *ReceiveEntries) bool {
@@ -616,6 +633,9 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	reply.ConflictIndex = -1
+	reply.ConflictTerm = -1
 
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
@@ -639,11 +659,19 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 	//2B
 	//处理和日志有关的
 	if len(rf.LogEntry) < args.PreLogIndex {
+		reply.ConflictIndex = len(rf.LogEntry)
 		return
 	}
 
 	// 如果本地有前一个日志的话，那么term必须相同，否则false
 	if args.PreLogIndex > 0 && rf.LogEntry[args.PreLogIndex-1].Term != args.PreLogTerm {
+		reply.ConflictTerm = rf.LogEntry[args.PreLogIndex-1].Term
+		for index := 1; index <= args.PreLogIndex; index++ { // 找到冲突term的首次出现位置，最差就是PrevLogIndex
+			if rf.LogEntry[index-1].Term == reply.ConflictTerm {
+				reply.ConflictIndex = index
+				break
+			}
+		}
 		return
 	}
 
