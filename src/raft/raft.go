@@ -105,6 +105,10 @@ type Raft struct {
 	matchIndex []int // 每个follower的log同步进度（初始为0），和nextIndex强关联
 
 	applyCh chan ApplyMsg
+
+	lastIncludeIndex int
+	lastIncludeTerm  int
+	snapshot         []byte
 }
 
 type LogEntry struct {
@@ -166,10 +170,26 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
+type InstallSnapshot struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Offset            int
+	Data              []byte //快照块的原始字节，从偏移量开始
+	Done              bool
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
-//
+//服务想要切换到快照。 只有在 Raft 没有这样做时才这样做
+//拥有更新的信息，因为它在 applyCh 上传达快照。
+//读取快照信息
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
@@ -181,9 +201,28 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
+// index代表是快照apply应用的index,而snapshot代表的是上层service传来的快照字节流，包括了Index之前的数据
+// 这个函数的目的是把安装到快照里的日志抛弃，并安装快照数据，同时更新快照下标，属于peers自身主动更新，与leader发送快照不冲突
+//index是leader提交后出现的，可能follower还没到那个索引
+//Snapshot 快照生成
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	if rf.killed() == true {
+		return
+	}
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	//更新快照下标
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VoteFor)
+	e.Encode(rf.LogEntry)
+	data := w.Bytes()
+
+	rf.persister.SaveStateAndSnapshot(data, snapshot)
 }
 
 //
@@ -763,6 +802,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		LastApplied: 0,
 		nextIndex:   make([]int, len(peers)),
 		matchIndex:  make([]int, len(peers)),
+		snapshot:    make([]byte, 0),
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
