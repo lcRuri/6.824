@@ -140,6 +140,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VoteFor)
 	e.Encode(rf.LogEntry)
+	e.Encode(rf.lastIncludeIndex)
+	e.Encode(rf.lastIncludeTerm)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -158,15 +160,21 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var voteFor int
 	var log []LogEntry
+	var lastIncludeIndex int
+	var lastIncludeTerm int
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//返回值是error，不为空说明有错
-	if d.Decode(&currentTerm) != nil || d.Decode(&voteFor) != nil || d.Decode(&log) != nil {
+	if d.Decode(&currentTerm) != nil || d.Decode(&voteFor) != nil || d.Decode(&log) != nil || d.Decode(&lastIncludeTerm) != nil || d.Decode(&lastIncludeIndex) != nil {
 		DPrintf("readPersist failed")
 	} else {
 		rf.CurrentTerm = currentTerm
 		rf.VoteFor = voteFor
 		rf.LogEntry = log
+		rf.lastIncludeIndex = lastIncludeIndex
+		rf.lastIncludeTerm = lastIncludeTerm
+
 	}
 }
 
@@ -189,10 +197,30 @@ type InstallSnapshotReply struct {
 // have more recent info since it communicate the snapshot on applyCh.
 //服务想要切换到快照。 只有在 Raft 没有这样做时才这样做
 //拥有更新的信息，因为它在 applyCh 上传达快照。
-//读取快照信息
+//强制执行快照？
+
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	//
+	//if lastIncludedIndex>=rf.lastIncludeIndex{
+	//	rf.LogEntry=make([]LogEntry, 0)
+	//	rf.lastIncludeIndex, rf.lastIncludeTerm = lastIncludedIndex, lastIncludedTerm
+	//	rf.LastApplied, rf.CommitIndex = lastIncludedIndex-1, lastIncludedIndex-1
+	//}
+	//
+	//w := new(bytes.Buffer)
+	//e := labgob.NewEncoder(w)
+	//e.Encode(rf.CurrentTerm)
+	//e.Encode(rf.VoteFor)
+	//e.Encode(rf.LogEntry)
+	//e.Encode(rf.lastIncludeTerm)
+	//e.Encode(rf.lastIncludeTerm)
+	//data := w.Bytes()
+	//
+	//rf.persister.SaveStateAndSnapshot(data, snapshot)
 
 	return true
 }
@@ -204,7 +232,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // index代表是快照apply应用的index,而snapshot代表的是上层service传来的快照字节流，包括了Index之前的数据
 // 这个函数的目的是把安装到快照里的日志抛弃，并安装快照数据，同时更新快照下标，属于peers自身主动更新，与leader发送快照不冲突
 //index是leader提交后出现的，可能follower还没到那个索引
-//Snapshot 快照生成
+//Snapshot 进行快照操作 自己调用
+
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	if rf.killed() == true {
@@ -213,16 +242,104 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//更新快照下标
+
+	//快照包含的最后一条日志的索引比index大
+	if rf.lastIncludeIndex >= index || index > rf.LastApplied {
+		DPrintf("[%d] has snapshot index=%d log", rf.me, rf.lastIncludeIndex)
+		return
+	}
+	DPrintf("snapshot index:%d rf.lastIncludeIndex:%d", index, rf.lastIncludeIndex)
+	oldLastIncludeIndex := rf.lastIncludeIndex
+	rf.lastIncludeIndex = index
+	rf.lastIncludeTerm = rf.LogEntry[index-1].Term
+	rf.snapshot = snapshot
+	//删除index之前的所有日志
+	rf.LogEntry = rf.LogEntry[index-oldLastIncludeIndex:]
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VoteFor)
 	e.Encode(rf.LogEntry)
+	e.Encode(rf.lastIncludeTerm)
+	e.Encode(rf.lastIncludeTerm)
 	data := w.Bytes()
 
 	rf.persister.SaveStateAndSnapshot(data, snapshot)
+
+	DPrintf("[%d] is Snapshot,lastIncludeIndex:%d,lastIncludeTerm:%d", rf.me, rf.lastIncludeIndex, rf.lastIncludeTerm)
+	DPrintf("%d Log:%v", rf.me, rf.LogEntry)
+
+}
+
+//InstallSnapshotLoop leader给follower发送自己的压缩的日志
+func (rf *Raft) InstallSnapshotLoop() {
+	for rf.killed() == false {
+		for rf.State == Leader {
+			for server := 0; server < len(rf.peers); server++ {
+				if server == rf.me {
+					continue
+				}
+
+				rf.mu.Lock()
+				args := &InstallSnapshot{
+					Term:              rf.CurrentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.lastIncludeIndex,
+					LastIncludedTerm:  rf.lastIncludeTerm,
+					Data:              rf.persister.ReadSnapshot(),
+				}
+				rf.mu.Unlock()
+
+				go func() {
+					reply := &InstallSnapshotReply{Term: 0}
+
+					ok := rf.sendInstallSnapshot(server, args, reply)
+
+					if ok {
+
+					}
+				}()
+			}
+
+		}
+	}
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshot, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term < rf.CurrentTerm {
+		reply.Term = rf.CurrentTerm
+		return
+	}
+
+	if args.Term > rf.CurrentTerm || rf.State != Follower {
+		rf.State = Follower
+		rf.VoteFor = -1
+		rf.CurrentTerm = args.Term
+		rf.lastActiveTime = time.Now()
+		rf.persist()
+	}
+
+	//如果自身快照包含的最后一个日志>=leader快照包含的最后一个日志，就没必要接受了
+	if rf.lastIncludeIndex >= args.LastIncludedIndex {
+		return
+	}
+
+	rf.applyCh <- ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+
 }
 
 //
@@ -570,12 +687,14 @@ func (rf *Raft) Listen() {
 				}
 
 				args.PreLogIndex = rf.nextIndex[peerId] - 1
-				//fmt.Printf("[%d] compare prelogindex:%d,commitindex:%d,rf.nextint[*peerid]:%d\n", *peerId, args.PreLogIndex, rf.CommitIndex, rf.nextIndex[*peerId])
+				//fmt.Printf("args:%v", args)
 				//最新的新日志为第0个，那么之前日志就不存在
 				if args.PreLogIndex > 0 {
 					args.PreLogTerm = rf.LogEntry[args.PreLogIndex-1].Term
 				}
 				args.Entries = append(args.Entries, rf.LogEntry[rf.nextIndex[peerId]-1:]...)
+
+				DPrintf("PreLogIndex:%d PreLogTerm:%d Entries:%v", args.PreLogIndex, args.PreLogTerm, args.Entries)
 				rf.mu.Unlock()
 
 				go rf.Heart(peerId, args)
@@ -761,7 +880,7 @@ func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
 					CommandIndex: (rf.LastApplied + 1),
 				})
 
-				//DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied].Command, rf.LastApplied)
+				DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied].Command, (rf.LastApplied + 1))
 				rf.LastApplied += 1
 
 			}
@@ -793,16 +912,17 @@ func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	//raft实例初始化
 	rf := &Raft{
-		mu:          sync.Mutex{},
-		peers:       peers,
-		persister:   persister,
-		me:          me,
-		LogEntry:    make([]LogEntry, 0),
-		CommitIndex: 0,
-		LastApplied: 0,
-		nextIndex:   make([]int, len(peers)),
-		matchIndex:  make([]int, len(peers)),
-		snapshot:    make([]byte, 0),
+		mu:               sync.Mutex{},
+		peers:            peers,
+		persister:        persister,
+		me:               me,
+		LogEntry:         make([]LogEntry, 0),
+		CommitIndex:      0,
+		LastApplied:      0,
+		nextIndex:        make([]int, len(peers)),
+		matchIndex:       make([]int, len(peers)),
+		lastIncludeIndex: 0,
+		lastIncludeTerm:  0,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
