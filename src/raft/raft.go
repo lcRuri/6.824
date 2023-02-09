@@ -276,30 +276,53 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) InstallSnapshotLoop() {
 	for rf.killed() == false {
 		for rf.State == Leader {
-			for server := 0; server < len(rf.peers); server++ {
-				if server == rf.me {
-					continue
-				}
-
-				rf.mu.Lock()
-				args := &InstallSnapshot{
-					Term:              rf.CurrentTerm,
-					LeaderId:          rf.me,
-					LastIncludedIndex: rf.lastIncludeIndex,
-					LastIncludedTerm:  rf.lastIncludeTerm,
-					Data:              rf.persister.ReadSnapshot(),
-				}
-				rf.mu.Unlock()
-
-				go func() {
-					reply := &InstallSnapshotReply{Term: 0}
-
-					ok := rf.sendInstallSnapshot(server, args, reply)
-
-					if ok {
-
+			if (rf.lastIncludeIndex+1)%10 == 0 {
+				for server := 0; server < len(rf.peers); server++ {
+					if server == rf.me {
+						continue
 					}
-				}()
+
+					rf.mu.Lock()
+					args := &InstallSnapshot{
+						Term:              rf.CurrentTerm,
+						LeaderId:          rf.me,
+						LastIncludedIndex: rf.lastIncludeIndex,
+						LastIncludedTerm:  rf.lastIncludeTerm,
+						Data:              rf.persister.ReadSnapshot(),
+					}
+					rf.mu.Unlock()
+
+					go func(server int) {
+						reply := &InstallSnapshotReply{Term: 0}
+
+						ok := rf.sendInstallSnapshot(server, args, reply)
+						DPrintf("[%d]->[%d] sendInstallSnapshot", rf.me, server)
+						rf.mu.Lock()
+						defer rf.mu.Unlock()
+						if ok {
+							if rf.State != Leader || args.Term != rf.CurrentTerm {
+								return
+							}
+
+							if reply.Term > rf.CurrentTerm {
+								rf.State = Follower
+								rf.CurrentTerm = reply.Term
+								rf.lastActiveTime = time.Now()
+								rf.persist()
+								return
+							}
+
+							if args.LastIncludedIndex > rf.matchIndex[server] {
+								rf.matchIndex[server] = args.LastIncludedIndex
+							}
+
+							if args.LastIncludedIndex+1 > rf.nextIndex[server] {
+								rf.nextIndex[server] = args.LastIncludedIndex + 1
+							}
+						}
+					}(server)
+					time.Sleep(10 * time.Millisecond)
+				}
 			}
 
 		}
@@ -340,6 +363,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotRep
 		SnapshotIndex: args.LastIncludedIndex,
 	}
 
+	DPrintf("[%d] Snapshot commit,SnapshotIndex:%d", rf.me, args.LastIncludedIndex)
 }
 
 //
@@ -944,6 +968,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	go rf.Listen()
 
 	go rf.applyToService(applyCh)
+
+	go rf.InstallSnapshotLoop()
 	DPrintf("%d init", rf.me)
 	return rf
 }
