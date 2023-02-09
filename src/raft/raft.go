@@ -272,59 +272,44 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-//InstallSnapshotLoop leader给follower发送自己的压缩的日志
-func (rf *Raft) InstallSnapshotLoop() {
-	for rf.killed() == false {
-		for rf.State == Leader {
-			if (rf.lastIncludeIndex+1)%10 == 0 {
-				for server := 0; server < len(rf.peers); server++ {
-					if server == rf.me {
-						continue
-					}
+//LeaderInstallSnapshot leader给follower发送自己的压缩的日志
+func (rf *Raft) LeaderInstallSnapshot(server int) {
 
-					rf.mu.Lock()
-					args := &InstallSnapshot{
-						Term:              rf.CurrentTerm,
-						LeaderId:          rf.me,
-						LastIncludedIndex: rf.lastIncludeIndex,
-						LastIncludedTerm:  rf.lastIncludeTerm,
-						Data:              rf.persister.ReadSnapshot(),
-					}
-					rf.mu.Unlock()
+	rf.mu.Lock()
+	args := &InstallSnapshot{
+		Term:              rf.CurrentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.lastIncludeIndex,
+		LastIncludedTerm:  rf.lastIncludeTerm,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+	rf.mu.Unlock()
 
-					go func(server int) {
-						reply := &InstallSnapshotReply{Term: 0}
+	reply := &InstallSnapshotReply{Term: 0}
 
-						ok := rf.sendInstallSnapshot(server, args, reply)
-						DPrintf("[%d]->[%d] sendInstallSnapshot", rf.me, server)
-						rf.mu.Lock()
-						defer rf.mu.Unlock()
-						if ok {
-							if rf.State != Leader || args.Term != rf.CurrentTerm {
-								return
-							}
+	ok := rf.sendInstallSnapshot(server, args, reply)
+	DPrintf("[%d]->[%d] sendInstallSnapshot", rf.me, server)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if ok {
+		if rf.State != Leader || args.Term != rf.CurrentTerm {
+			return
+		}
 
-							if reply.Term > rf.CurrentTerm {
-								rf.State = Follower
-								rf.CurrentTerm = reply.Term
-								rf.lastActiveTime = time.Now()
-								rf.persist()
-								return
-							}
+		if reply.Term > rf.CurrentTerm {
+			rf.State = Follower
+			rf.CurrentTerm = reply.Term
+			rf.lastActiveTime = time.Now()
+			rf.persist()
+			return
+		}
 
-							if args.LastIncludedIndex > rf.matchIndex[server] {
-								rf.matchIndex[server] = args.LastIncludedIndex
-							}
+		if args.LastIncludedIndex > rf.matchIndex[server] {
+			rf.matchIndex[server] = args.LastIncludedIndex
+		}
 
-							if args.LastIncludedIndex+1 > rf.nextIndex[server] {
-								rf.nextIndex[server] = args.LastIncludedIndex + 1
-							}
-						}
-					}(server)
-					time.Sleep(10 * time.Millisecond)
-				}
-			}
-
+		if args.LastIncludedIndex+1 > rf.nextIndex[server] {
+			rf.nextIndex[server] = args.LastIncludedIndex + 1
 		}
 	}
 }
@@ -336,33 +321,63 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshot, reply *In
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
+		rf.mu.Unlock()
 		return
 	}
 
-	if args.Term > rf.CurrentTerm || rf.State != Follower {
-		rf.State = Follower
-		rf.VoteFor = -1
-		rf.CurrentTerm = args.Term
-		rf.lastActiveTime = time.Now()
-		rf.persist()
-	}
+	rf.State = Follower
+	rf.VoteFor = -1
+	rf.CurrentTerm = args.Term
+	rf.lastActiveTime = time.Now()
+	rf.persist()
 
 	//如果自身快照包含的最后一个日志>=leader快照包含的最后一个日志，就没必要接受了
 	if rf.lastIncludeIndex >= args.LastIncludedIndex {
+		rf.mu.Unlock()
 		return
 	}
 
-	rf.applyCh <- ApplyMsg{
+	// 将快照后的logs切割，快照前的直接applied
+	index := args.LastIncludedIndex
+	tempLog := make([]LogEntry, 0)
+
+	for i := index + 1; i <= len(rf.LogEntry); i++ {
+		tempLog = append(tempLog, rf.LogEntry[i])
+	}
+
+	rf.lastIncludeIndex = args.LastIncludedIndex
+	rf.lastIncludeTerm = args.LastIncludedTerm
+	rf.LogEntry = tempLog
+
+	if index > rf.CommitIndex {
+		rf.CommitIndex = index
+	}
+	if index > rf.LastApplied {
+		rf.LastApplied = index
+	}
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VoteFor)
+	e.Encode(rf.LogEntry)
+	e.Encode(rf.lastIncludeTerm)
+	e.Encode(rf.lastIncludeTerm)
+	data := w.Bytes()
+
+	rf.persister.SaveStateAndSnapshot(data, args.Data)
+
+	msg := ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex,
 	}
-
+	rf.mu.Unlock()
+	rf.applyCh <- msg
 	DPrintf("[%d] Snapshot commit,SnapshotIndex:%d", rf.me, args.LastIncludedIndex)
 }
 
@@ -702,6 +717,13 @@ func (rf *Raft) Listen() {
 					continue
 				}
 
+				if rf.nextIndex[peerId]+1 < rf.lastIncludeIndex {
+					DPrintf("[%d]LeaderInstallSnapshot(%d)", rf.me, peerId)
+					go rf.LeaderInstallSnapshot(peerId)
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+
 				rf.mu.Lock()
 				args := &AppendEntries{
 					Term:         rf.CurrentTerm,
@@ -710,7 +732,10 @@ func (rf *Raft) Listen() {
 					Entries:      make([]LogEntry, 0),
 				}
 
-				args.PreLogIndex = rf.nextIndex[peerId] - 1
+				DPrintf("%d ---> %d,nextIndex:%d,args.PreLogIndex:%d", rf.me, peerId, rf.nextIndex[peerId], rf.nextIndex[peerId]-1-rf.lastIncludeIndex)
+				//todo
+				args.PreLogIndex = rf.nextIndex[peerId] - 1 - rf.lastIncludeIndex
+
 				//fmt.Printf("args:%v", args)
 				//最新的新日志为第0个，那么之前日志就不存在
 				if args.PreLogIndex > 0 {
@@ -969,7 +994,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	go rf.applyToService(applyCh)
 
-	go rf.InstallSnapshotLoop()
 	DPrintf("%d init", rf.me)
 	return rf
 }
