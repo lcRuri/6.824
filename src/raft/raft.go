@@ -251,7 +251,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	DPrintf("snapshot index:%d rf.lastIncludeIndex:%d", index, rf.lastIncludeIndex)
 	oldLastIncludeIndex := rf.lastIncludeIndex
 	rf.lastIncludeIndex = index
-	rf.lastIncludeTerm = rf.LogEntry[index-1].Term
+	rf.lastIncludeTerm = rf.LogEntry[index-1-oldLastIncludeIndex].Term
 	rf.snapshot = snapshot
 	//删除index之前的所有日志
 	rf.LogEntry = rf.LogEntry[index-oldLastIncludeIndex:]
@@ -293,6 +293,7 @@ func (rf *Raft) LeaderInstallSnapshot(server int) {
 	defer rf.mu.Unlock()
 	if ok {
 		if rf.State != Leader || args.Term != rf.CurrentTerm {
+			DPrintf("snapshot not leader")
 			return
 		}
 
@@ -301,16 +302,22 @@ func (rf *Raft) LeaderInstallSnapshot(server int) {
 			rf.CurrentTerm = reply.Term
 			rf.lastActiveTime = time.Now()
 			rf.persist()
+			DPrintf("snapshot reply false reply.Term:%d > rf.CurrentTerm:%d", reply.Term, rf.CurrentTerm)
 			return
 		}
 
 		if args.LastIncludedIndex > rf.matchIndex[server] {
 			rf.matchIndex[server] = args.LastIncludedIndex
+			DPrintf("snapshot update [%d]matchInt:%d", server, rf.matchIndex[server])
 		}
 
 		if args.LastIncludedIndex+1 > rf.nextIndex[server] {
 			rf.nextIndex[server] = args.LastIncludedIndex + 1
+			DPrintf("snapshot update [%d]nextInt:%d", server, rf.nextIndex[server])
+
 		}
+	} else {
+		DPrintf("snapshot false")
 	}
 }
 
@@ -325,9 +332,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotRep
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		rf.mu.Unlock()
+		DPrintf("InstallSnapshot false args.Term:%d rf.CurrentTerm:%d", args.Term, rf.CurrentTerm)
 		return
 	}
 
+	reply.Term = args.Term
 	rf.State = Follower
 	rf.VoteFor = -1
 	rf.CurrentTerm = args.Term
@@ -336,6 +345,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotRep
 
 	//如果自身快照包含的最后一个日志>=leader快照包含的最后一个日志，就没必要接受了
 	if rf.lastIncludeIndex >= args.LastIncludedIndex {
+		DPrintf("InstallSnapshot false rf.lastIncludeIndex:%d >= args.LastIncludedIndex:%d", rf.lastIncludeIndex, args.LastIncludedIndex)
 		rf.mu.Unlock()
 		return
 	}
@@ -359,6 +369,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotRep
 		rf.LastApplied = index
 	}
 
+	DPrintf("[%d] CommitIndex:%d LastApplied:%d", rf.me, rf.CommitIndex, rf.LastApplied)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.CurrentTerm)
@@ -717,8 +728,9 @@ func (rf *Raft) Listen() {
 					continue
 				}
 
-				if rf.nextIndex[peerId]+1 < rf.lastIncludeIndex {
+				if rf.nextIndex[peerId]-1 < rf.lastIncludeIndex {
 					DPrintf("[%d]LeaderInstallSnapshot(%d)", rf.me, peerId)
+					DPrintf("xxx rf.nextIndex[peerId]:%d rf.lastIncludeIndex:%d", rf.nextIndex[peerId], rf.lastIncludeIndex)
 					go rf.LeaderInstallSnapshot(peerId)
 					time.Sleep(10 * time.Millisecond)
 					continue
@@ -734,14 +746,14 @@ func (rf *Raft) Listen() {
 
 				DPrintf("%d ---> %d,nextIndex:%d,args.PreLogIndex:%d", rf.me, peerId, rf.nextIndex[peerId], rf.nextIndex[peerId]-1-rf.lastIncludeIndex)
 				//todo
-				args.PreLogIndex = rf.nextIndex[peerId] - 1 - rf.lastIncludeIndex
+				args.PreLogIndex = rf.nextIndex[peerId] - 1
 
 				//fmt.Printf("args:%v", args)
 				//最新的新日志为第0个，那么之前日志就不存在
-				if args.PreLogIndex > 0 {
-					args.PreLogTerm = rf.LogEntry[args.PreLogIndex-1].Term
+				if args.PreLogIndex-rf.lastIncludeIndex > 0 {
+					args.PreLogTerm = rf.LogEntry[args.PreLogIndex-1-rf.lastIncludeIndex].Term
 				}
-				args.Entries = append(args.Entries, rf.LogEntry[rf.nextIndex[peerId]-1:]...)
+				args.Entries = append(args.Entries, rf.LogEntry[rf.nextIndex[peerId]-1-rf.lastIncludeIndex:]...)
 
 				DPrintf("PreLogIndex:%d PreLogTerm:%d Entries:%v", args.PreLogIndex, args.PreLogTerm, args.Entries)
 				rf.mu.Unlock()
@@ -782,6 +794,7 @@ func (rf *Raft) Heart(peerId int, args *AppendEntries) {
 		if reply.Success == true {
 
 			//可能将部分截断，和之前的nextIndex不一样，所以不能直接加上len(args.Entries)
+			//todo
 			rf.nextIndex[peerId] = args.PreLogIndex + len(args.Entries) + 1
 			rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
 			DPrintf("rf.nextIndex[%d]:%d,rf.matchIndex[%d]:%d", peerId, rf.nextIndex[peerId], peerId, rf.matchIndex[peerId])
@@ -798,18 +811,18 @@ func (rf *Raft) Heart(peerId int, args *AppendEntries) {
 
 			sort.Ints(sortArr)
 			newCommitIndex := sortArr[len(rf.peers)/2]
-			if newCommitIndex > rf.CommitIndex && rf.LogEntry[newCommitIndex-1].Term == rf.CurrentTerm {
+			if newCommitIndex > rf.CommitIndex && rf.LogEntry[newCommitIndex-1-rf.lastIncludeIndex].Term == rf.CurrentTerm {
 				rf.CommitIndex = newCommitIndex
 				DPrintf("Leader%d CommitIndex Updated is %d", rf.me, rf.CommitIndex)
 			}
 
 			//fmt.Println(sortArr)
 		} else {
-			nextIndexBefore := rf.nextIndex[peerId] // 仅为打印log
+			//nextIndexBefore := rf.nextIndex[peerId] // 仅为打印log
 
 			if reply.ConflictTerm != -1 { // follower的prevLogIndex位置term不同
 				conflictTermIndex := -1
-				for index := args.PreLogIndex; index >= 1; index-- { // 找最后一个conflictTerm
+				for index := args.PreLogIndex - rf.lastIncludeIndex; index >= 1; index-- { // 找最后一个conflictTerm
 					if rf.LogEntry[index-1].Term == reply.ConflictTerm {
 						conflictTermIndex = index
 						break
@@ -823,7 +836,7 @@ func (rf *Raft) Heart(peerId int, args *AppendEntries) {
 			} else { // follower的prevLogIndex位置没有日志
 				rf.nextIndex[peerId] = reply.ConflictIndex + 1
 			}
-			DPrintf("RaftNode[%d] back-off nextIndex, peer[%d] nextIndexBefore[%d] nextIndex[%d]", rf.me, peerId, nextIndexBefore, rf.nextIndex[peerId])
+			DPrintf("heart false rf.nextIndex[%d]:%d,rf.matchIndex[%d]:%d", peerId, rf.nextIndex[peerId], peerId, rf.matchIndex[peerId])
 		}
 
 	}
@@ -865,15 +878,15 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 	DPrintf("[%d]->[%d] len(rf.LogEntry):%d args.PreLogIndex:%d args.PreLogTerm:%d", args.LeaderId, rf.me, len(rf.LogEntry), args.PreLogIndex, args.PreLogTerm)
 	//2B
 	//处理和日志有关的
-	if len(rf.LogEntry) < args.PreLogIndex {
+	if len(rf.LogEntry) < args.PreLogIndex-rf.lastIncludeIndex {
 		reply.ConflictIndex = len(rf.LogEntry)
 		return
 	}
 
 	// 如果本地有前一个日志的话，那么term必须相同，否则false
-	if args.PreLogIndex > 0 && rf.LogEntry[args.PreLogIndex-1].Term != args.PreLogTerm {
-		reply.ConflictTerm = rf.LogEntry[args.PreLogIndex-1].Term
-		for index := 1; index <= args.PreLogIndex; index++ { // 找到冲突term的首次出现位置，最差就是PrevLogIndex
+	if args.PreLogIndex-rf.lastIncludeIndex > 0 && rf.LogEntry[args.PreLogIndex-1-rf.lastIncludeIndex].Term != args.PreLogTerm {
+		reply.ConflictTerm = rf.LogEntry[args.PreLogIndex-1-rf.lastIncludeIndex].Term
+		for index := 1; index <= args.PreLogIndex-rf.lastIncludeIndex; index++ { // 找到冲突term的首次出现位置，最差就是PrevLogIndex
 			if rf.LogEntry[index-1].Term == reply.ConflictTerm {
 				reply.ConflictIndex = index
 				break
@@ -885,7 +898,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 	//会进行强制覆盖重写
 	//important
 	for i, entry := range args.Entries {
-		index := args.PreLogIndex + i + 1
+		index := args.PreLogIndex + i + 1 - rf.lastIncludeIndex
 		if index > len(rf.LogEntry) {
 			rf.LogEntry = append(rf.LogEntry, entry)
 		} else {
@@ -899,15 +912,16 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 	rf.persist()
 
 	reply.Success = true
-	DPrintf("%d receive from %d,dealing log success", rf.me, args.LeaderId)
-	//go func() { rf.waitTime <- rand.Intn(150) + 150 }()
 
+	//压缩之后本地日志长度改变
+	//todo
 	if rf.CommitIndex < args.LeaderCommit {
 		rf.CommitIndex = args.LeaderCommit
 		if len(rf.LogEntry) < rf.CommitIndex {
-			rf.CommitIndex = len(rf.LogEntry)
+			rf.CommitIndex = len(rf.LogEntry) + rf.lastIncludeIndex
 		}
 	}
+	DPrintf("%d receive from %d,dealing log success CommitIndex:%d LastApplied:%d", rf.me, args.LeaderId, rf.CommitIndex, rf.LastApplied)
 
 	rf.persist()
 	//DPrintf("[%d] receive from leader:%d", rf.me, args.CandidateId)
@@ -925,11 +939,11 @@ func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
 			for rf.CommitIndex > rf.LastApplied {
 				appliedArr = append(appliedArr, ApplyMsg{
 					CommandValid: true,
-					Command:      rf.LogEntry[rf.LastApplied].Command,
+					Command:      rf.LogEntry[rf.LastApplied-rf.lastIncludeIndex].Command,
 					CommandIndex: (rf.LastApplied + 1),
 				})
 
-				DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied].Command, (rf.LastApplied + 1))
+				DPrintf("[%d] Command:%v CommandIndex%d commit", rf.me, rf.LogEntry[rf.LastApplied-rf.lastIncludeIndex].Command, (rf.LastApplied + 1))
 				rf.LastApplied += 1
 
 			}
