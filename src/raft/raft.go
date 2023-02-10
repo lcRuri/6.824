@@ -201,27 +201,6 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
-	// Your code here (2D).
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
-	//
-	//if lastIncludedIndex>=rf.lastIncludeIndex{
-	//	rf.LogEntry=make([]LogEntry, 0)
-	//	rf.lastIncludeIndex, rf.lastIncludeTerm = lastIncludedIndex, lastIncludedTerm
-	//	rf.LastApplied, rf.CommitIndex = lastIncludedIndex-1, lastIncludedIndex-1
-	//}
-	//
-	//w := new(bytes.Buffer)
-	//e := labgob.NewEncoder(w)
-	//e.Encode(rf.CurrentTerm)
-	//e.Encode(rf.VoteFor)
-	//e.Encode(rf.LogEntry)
-	//e.Encode(rf.lastIncludeTerm)
-	//e.Encode(rf.lastIncludeTerm)
-	//data := w.Bytes()
-	//
-	//rf.persister.SaveStateAndSnapshot(data, snapshot)
-
 	return true
 }
 
@@ -261,7 +240,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VoteFor)
 	e.Encode(rf.LogEntry)
-	e.Encode(rf.lastIncludeTerm)
+	e.Encode(rf.lastIncludeIndex)
 	e.Encode(rf.lastIncludeTerm)
 	data := w.Bytes()
 
@@ -319,6 +298,7 @@ func (rf *Raft) LeaderInstallSnapshot(server int) {
 	} else {
 		DPrintf("snapshot false")
 	}
+	rf.persist()
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshot, reply *InstallSnapshotReply) bool {
@@ -368,19 +348,18 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotRep
 	if index > rf.LastApplied {
 		rf.LastApplied = index
 	}
-
-	DPrintf("[%d] CommitIndex:%d LastApplied:%d", rf.me, rf.CommitIndex, rf.LastApplied)
+	rf.persist()
+	DPrintf("[%d] CommitIndex:%d LastApplied:%d lastIncludeIndex:%d", rf.me, rf.CommitIndex, rf.LastApplied, rf.lastIncludeIndex)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VoteFor)
 	e.Encode(rf.LogEntry)
-	e.Encode(rf.lastIncludeTerm)
+	e.Encode(rf.lastIncludeIndex)
 	e.Encode(rf.lastIncludeTerm)
 	data := w.Bytes()
 
 	rf.persister.SaveStateAndSnapshot(data, args.Data)
-
 	msg := ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
@@ -388,8 +367,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotRep
 		SnapshotIndex: args.LastIncludedIndex,
 	}
 	rf.mu.Unlock()
+
 	rf.applyCh <- msg
 	DPrintf("[%d] Snapshot commit,SnapshotIndex:%d", rf.me, args.LastIncludedIndex)
+
 }
 
 //
@@ -562,9 +543,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	//leader日志数组里面的实际的索引比认为的小1(因为是从0开始)
 	rf.LogEntry = append(rf.LogEntry, LogEntry{Command: command, Term: rf.CurrentTerm})
 
-	DPrintf("leader%d receive cmd:%v,term:%d\n", rf.me, command, rf.CurrentTerm)
+	DPrintf("leader%d receive cmd:%v,term:%d,index:%d\n", rf.me, command, rf.CurrentTerm, len(rf.LogEntry)+rf.lastIncludeIndex)
 	//返回命令提交后将出现的索引
-	index = len(rf.LogEntry)
+	index = len(rf.LogEntry) + rf.lastIncludeIndex
 	term = rf.CurrentTerm
 	return index, term, isLeader
 }
@@ -729,37 +710,36 @@ func (rf *Raft) Listen() {
 				}
 
 				if rf.nextIndex[peerId]-1 < rf.lastIncludeIndex {
-					DPrintf("[%d]LeaderInstallSnapshot(%d)", rf.me, peerId)
-					DPrintf("xxx rf.nextIndex[peerId]:%d rf.lastIncludeIndex:%d", rf.nextIndex[peerId], rf.lastIncludeIndex)
+					DPrintf("[%d]LeaderInstallSnapshot(%d) rf.nextIndex[peerId]:%d rf.lastIncludeIndex:%d", rf.me, peerId, rf.nextIndex[peerId], rf.lastIncludeIndex)
 					go rf.LeaderInstallSnapshot(peerId)
+				} else {
+					rf.mu.Lock()
+					args := &AppendEntries{
+						Term:         rf.CurrentTerm,
+						LeaderId:     rf.me,
+						LeaderCommit: rf.CommitIndex,
+						Entries:      make([]LogEntry, 0),
+					}
+
+					DPrintf("%d ---> %d,nextIndex:%d,args.PreLogIndex:%d", rf.me, peerId, rf.nextIndex[peerId], rf.nextIndex[peerId]-1)
+					//todo
+					args.PreLogIndex = rf.nextIndex[peerId] - 1
+
+					//fmt.Printf("args:%v", args)
+					//最新的新日志为第0个，那么之前日志就不存在
+					if args.PreLogIndex-rf.lastIncludeIndex > 0 {
+						args.PreLogTerm = rf.LogEntry[args.PreLogIndex-1-rf.lastIncludeIndex].Term
+					} else if args.PreLogIndex == rf.lastIncludeIndex {
+						args.PreLogTerm = rf.lastIncludeTerm
+					}
+					args.Entries = append(args.Entries, rf.LogEntry[rf.nextIndex[peerId]-1-rf.lastIncludeIndex:]...)
+
+					DPrintf("PreLogIndex:%d PreLogTerm:%d Entries:%v", args.PreLogIndex, args.PreLogTerm, args.Entries)
+					rf.mu.Unlock()
+
+					go rf.Heart(peerId, args)
 					time.Sleep(10 * time.Millisecond)
-					continue
 				}
-
-				rf.mu.Lock()
-				args := &AppendEntries{
-					Term:         rf.CurrentTerm,
-					LeaderId:     rf.me,
-					LeaderCommit: rf.CommitIndex,
-					Entries:      make([]LogEntry, 0),
-				}
-
-				DPrintf("%d ---> %d,nextIndex:%d,args.PreLogIndex:%d", rf.me, peerId, rf.nextIndex[peerId], rf.nextIndex[peerId]-1-rf.lastIncludeIndex)
-				//todo
-				args.PreLogIndex = rf.nextIndex[peerId] - 1
-
-				//fmt.Printf("args:%v", args)
-				//最新的新日志为第0个，那么之前日志就不存在
-				if args.PreLogIndex-rf.lastIncludeIndex > 0 {
-					args.PreLogTerm = rf.LogEntry[args.PreLogIndex-1-rf.lastIncludeIndex].Term
-				}
-				args.Entries = append(args.Entries, rf.LogEntry[rf.nextIndex[peerId]-1-rf.lastIncludeIndex:]...)
-
-				DPrintf("PreLogIndex:%d PreLogTerm:%d Entries:%v", args.PreLogIndex, args.PreLogTerm, args.Entries)
-				rf.mu.Unlock()
-
-				go rf.Heart(peerId, args)
-				time.Sleep(10 * time.Millisecond)
 
 			}
 			rf.persist()
@@ -860,6 +840,7 @@ func (rf *Raft) LeaderHeart(args *AppendEntries, reply *ReceiveEntries) {
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
+		DPrintf("LeaderHeart args.Term:%d < rf.CurrentTerm:%d", args.Term, rf.CurrentTerm)
 		return
 	}
 
@@ -947,6 +928,7 @@ func (rf *Raft) applyToService(applyCh chan ApplyMsg) {
 				rf.LastApplied += 1
 
 			}
+
 		}()
 
 		DPrintf("%d Log:%v", rf.me, rf.LogEntry)
@@ -986,6 +968,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		matchIndex:       make([]int, len(peers)),
 		lastIncludeIndex: 0,
 		lastIncludeTerm:  0,
+		applyCh:          applyCh,
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
