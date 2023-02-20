@@ -18,11 +18,17 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Index    int
+	Term     int
+	Type     string
+	Key      string
+	Value    string
+	SeqId    int64
+	ClientId int64
 }
 
 type KVServer struct {
@@ -35,8 +41,22 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	kvStore map[string]string
+	reqMap  map[int]*OpContext
+	seqMap  map[int64]int64
 }
 
+//等待raft提交期间的Op上下文，用来唤醒阻塞的RPC
+type OpContext struct {
+	op        *Op
+	committed chan byte
+
+	wrongLeader bool // 因为index位置log的term不一致, 说明leader换过了
+	ignore      bool // 因为req id过期, 导致该日志被跳过
+
+	keyExist bool
+	value    string
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
