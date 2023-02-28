@@ -85,7 +85,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	//当已经写入leader
 	//创建当前请求的上下文
-	opCtx := new(OpContext)
+	opCtx := newOpContext(op)
 
 	func() {
 		kv.mu.Lock()
@@ -149,7 +149,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	//当已经写入leader
 	//创建当前请求的上下文
-	opCtx := new(OpContext)
+	opCtx := newOpContext(op)
 
 	func() {
 		kv.mu.Lock()
@@ -187,13 +187,21 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 }
 
+func newOpContext(op *Op) (opCtx *OpContext) {
+	opCtx = &OpContext{
+		op:        op,
+		committed: make(chan byte),
+	}
+	return
+}
+
 func (kv *KVServer) applyLoop() {
 	for !kv.killed() {
 		select {
 		case msg := <-kv.applyCh:
 			cmd := msg.Command
 			index := msg.CommandIndex
-
+			DPrintf("kv.reqMap[%v]", kv.reqMap)
 			func() {
 				kv.mu.Lock()
 				defer kv.mu.Unlock()
@@ -204,6 +212,7 @@ func (kv *KVServer) applyLoop() {
 				prevSeq, existSeq := kv.seqMap[op.ClientId]
 				kv.seqMap[op.ClientId] = op.SeqId
 
+				DPrintf("kv.reqMap[%v]", kv.reqMap)
 				if existOp { // 存在等待结果的RPC, 那么判断状态是否与写入时一致
 					if opCtx.op.Term != op.Term {
 						opCtx.wrongLeader = true
@@ -279,7 +288,7 @@ func (kv *KVServer) killed() bool {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+	labgob.Register(&Op{})
 
 	kv := new(KVServer)
 	kv.me = me
