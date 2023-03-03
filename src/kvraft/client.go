@@ -68,6 +68,7 @@ func (ck *Clerk) Get(key string) string {
 			if reply.Err == OK {
 				return reply.Value
 			} else if reply.Err == ErrNoKey {
+				DPrintf("KVServer.Get ErrNoKey")
 				return ""
 			}
 		}
@@ -140,8 +141,8 @@ func (ck *Clerk) changeLeaderId() int {
 	return ck.leaderId
 }
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, OP_TYPE_PUT)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, OP_TYPE_APPEND)
 }

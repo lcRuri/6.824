@@ -196,23 +196,22 @@ func newOpContext(op *Op) (opCtx *OpContext) {
 }
 
 func (kv *KVServer) applyLoop() {
-	for !kv.killed() {
+	for kv.killed() == false {
 		select {
 		case msg := <-kv.applyCh:
 			cmd := msg.Command
 			index := msg.CommandIndex
-			DPrintf("kv.reqMap[%v]", kv.reqMap)
+			//log.Printf("kv.reqMap[%v] msg:%v", kv.reqMap, msg)
 			func() {
 				kv.mu.Lock()
 				defer kv.mu.Unlock()
 
 				op := cmd.(*Op)
-
+				log.Printf("op:%v\n", op)
 				opCtx, existOp := kv.reqMap[index]
 				prevSeq, existSeq := kv.seqMap[op.ClientId]
 				kv.seqMap[op.ClientId] = op.SeqId
 
-				DPrintf("kv.reqMap[%v]", kv.reqMap)
 				if existOp { // 存在等待结果的RPC, 那么判断状态是否与写入时一致
 					if opCtx.op.Term != op.Term {
 						opCtx.wrongLeader = true
@@ -220,23 +219,31 @@ func (kv *KVServer) applyLoop() {
 				}
 
 				if op.Type == OP_TYPE_PUT || op.Type == OP_TYPE_APPEND {
+					log.Printf("trying to putAppend\n")
 					//递增的id请求
 					if !existSeq || op.SeqId > prevSeq {
 						if op.Type == OP_TYPE_PUT {
+							log.Printf("put op:%v\n", op)
 							kv.kvStore[op.Key] = op.Value
 						} else if op.Type == OP_TYPE_APPEND {
 							if val, exist := kv.kvStore[op.Key]; exist {
+								log.Printf("append exist op:%v\n", op)
 								kv.kvStore[op.Key] = val + op.Value
 							} else {
+								log.Printf("append op:%v\n", op)
 								kv.kvStore[op.Key] = op.Value
 							}
 						}
 					} else if existOp {
 						opCtx.ignore = true
 					}
+
+					log.Printf("kvstore:%v\n", kv.kvStore)
 				} else { // OP_TYPE_GET
+					log.Printf("get op key:%v existOp:%v\n", op.Key, existOp)
 					if existOp {
 						opCtx.value, opCtx.keyExist = kv.kvStore[op.Key]
+
 					}
 				}
 				DPrintf("RaftNode[%d] applyLoop, kvStore[%v]", kv.me, kv.kvStore)
@@ -305,5 +312,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.seqMap = make(map[int64]int64)
 
 	go kv.applyLoop()
+	log.Printf("kv start")
 	return kv
 }
